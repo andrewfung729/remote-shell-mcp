@@ -142,8 +142,11 @@ func main() {
 	// unauthenticated.
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", streamable)
+	// Wrap the whole mux so a hostile web page can't drive the daemon:
+	// Host must be loopback on the bound port (DNS-rebinding), any Origin
+	// must be same-origin, and /api POSTs must carry a JSON content type.
 	httpSrv := &http.Server{
-		Handler: mux,
+		Handler: daemon.Guard(boundAddr, "/api", mux),
 		// Defend against slowloris from a local process holding a connection
 		// open without sending headers. The streamable transport's GET stream
 		// is long-lived, so we don't set ReadTimeout / WriteTimeout (which

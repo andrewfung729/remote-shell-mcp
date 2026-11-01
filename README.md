@@ -104,8 +104,12 @@ Defaults live in `$XDG_CONFIG_HOME/remote-shell-mcp/` (`~/.config/remote-shell-m
 The daemon only ever binds loopback. A non-loopback `-addr` is rejected at
 startup and a taken port exits non-zero — there is no way to accidentally
 expose command execution to the network. On loopback there is no auth token;
-the Host/Origin guard on the HTTP mux is what keeps a hostile web page from
-driving the daemon.
+instead a single guard wraps the whole HTTP mux so a web page you visit can't
+drive the daemon: the request's `Host` must be a loopback name on the bound
+port (blocks DNS rebinding), any `Origin` header must be same-origin (blocks
+cross-site `fetch()`), and `POST`s under `/api` must carry
+`application/json` (blocks preflight-free simple requests). Native MCP
+clients and `curl` send no `Origin` and pass through.
 
 ## End-to-end tests
 
@@ -134,7 +138,7 @@ internal/
   sshx/                SSH manager, dial chain, PTY shells, SFTP, keepalive
   mcptools/            MCP tool registrations, debounced state flusher
   state/               on-disk session persistence/restore
-  daemon/              pidfile lock, handle publish, loopback listener, auto-spawn (Ensure)
+  daemon/              pidfile lock, handle publish, loopback listener, Host/Origin guard
 test/e2e/              end-to-end tests + sshd container Dockerfile
 ```
 
