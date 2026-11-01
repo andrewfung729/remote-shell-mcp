@@ -3,46 +3,21 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	toon "github.com/toon-format/toon-go"
 
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 	"github.com/jaenster/remote-shell-mcp/internal/state"
 )
 
-// OutputFormat controls how tool results are serialized into MCP text content.
-// LLM consumers paying per token may prefer TOON for arrays of uniform
-// objects (ssh_file_list, forward lists, etc.) where it cuts ~30-50%
-// vs. JSON.
-type OutputFormat string
-
-const (
-	FormatJSON OutputFormat = "json"
-	FormatTOON OutputFormat = "toon"
-)
-
-func ParseFormat(s string) (OutputFormat, error) {
-	switch OutputFormat(s) {
-	case "":
-		return FormatJSON, nil
-	case FormatJSON, FormatTOON:
-		return OutputFormat(s), nil
-	default:
-		return "", fmt.Errorf("unknown output format %q (want json or toon)", s)
-	}
-}
-
 type State struct {
-	SSH    *sshx.Manager
-	Store  *state.Store
-	Log    *slog.Logger
-	Format OutputFormat // json (default) or toon
+	SSH   *sshx.Manager
+	Store *state.Store
+	Log   *slog.Logger
 
 	flushStartOnce sync.Once
 	flushReqCh     chan struct{} // capacity 1; coalesced "please flush" signal
@@ -146,47 +121,13 @@ func Build(st *State, name, version string) *server.MCPServer {
 	RegisterSSH(srv, st)
 	RegisterSSHShell(srv, st)
 	RegisterSFTP(srv, st)
-	RegisterMeta(srv, st)
 	return srv
 }
 
-// resultJSON serializes a result for an MCP text-content reply. Despite the
-// name, the actual format respects State.Format — JSON (default) or TOON.
-// Renamed call sites would be churn; the function semantic is "structured
-// result, encoded according to the daemon's output-format setting".
+// resultJSON serializes a result for an MCP text-content reply. All tool
+// results are JSON — the alternative output format was removed (issue #1).
 func (s *State) resultJSON(v any) (*mcp.CallToolResult, error) {
-	switch s.Format {
-	case FormatTOON:
-		// toon-go reads `toon:"..."` struct tags, not `json:"..."`. We
-		// already json-tagged every result type, so the cheapest way to
-		// make TOON output use the same field names a JSON consumer sees
-		// is to marshal → unmarshal-to-generic → toon-marshal. The extra
-		// pass costs microseconds for our payload sizes.
-		raw, err := json.Marshal(v)
-		if err != nil {
-			if s.Log != nil {
-				s.Log.Warn("json encode for toon path failed; falling back to JSON", "err", err)
-			}
-			return jsonResult(v)
-		}
-		var generic any
-		if err := json.Unmarshal(raw, &generic); err != nil {
-			if s.Log != nil {
-				s.Log.Warn("json reparse for toon path failed; falling back to JSON", "err", err)
-			}
-			return jsonResult(v)
-		}
-		data, err := toon.MarshalString(generic)
-		if err != nil {
-			if s.Log != nil {
-				s.Log.Warn("toon encode failed; falling back to JSON", "err", err)
-			}
-			return jsonResult(v)
-		}
-		return mcp.NewToolResultText(data), nil
-	default:
-		return jsonResult(v)
-	}
+	return jsonResult(v)
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, error) {

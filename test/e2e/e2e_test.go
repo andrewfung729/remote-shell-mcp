@@ -437,46 +437,6 @@ func TestSSHMultiAddress(t *testing.T) {
 	}
 }
 
-// TestSSHClone forks an existing session under a new id and confirms both
-// answer exec independently.
-func TestSSHClone(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "orig", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if _, err := mc.Call(ctx, "ssh_clone", map[string]any{"source_id": "orig", "new_id": "twin"}); err != nil {
-		t.Fatalf("clone: %v", err)
-	}
-	for _, id := range []string{"orig", "twin"} {
-		var res execResp
-		if err := mc.CallJSON(ctx, "ssh_exec", map[string]any{
-			"session_id": id, "command": "echo " + id,
-		}, &res); err != nil {
-			t.Fatalf("exec on %s: %v", id, err)
-		}
-		if !strings.Contains(res.Stdout, id) {
-			t.Fatalf("exec on %s returned %q", id, res.Stdout)
-		}
-	}
-	// Closing one should not affect the other.
-	if _, err := mc.Call(ctx, "ssh_disconnect", map[string]any{"id": "orig"}); err != nil {
-		t.Fatalf("disconnect orig: %v", err)
-	}
-	var res execResp
-	if err := mc.CallJSON(ctx, "ssh_exec", map[string]any{
-		"session_id": "twin", "command": "echo still-alive",
-	}, &res); err != nil {
-		t.Fatalf("twin exec after orig disconnect: %v", err)
-	}
-	if !strings.Contains(res.Stdout, "still-alive") {
-		t.Fatalf("twin output %q", res.Stdout)
-	}
-}
-
 // TestSSHKeyAuth exercises per-spec key auth: a fresh ephemeral keypair
 // (not the baked-in suite key) installed into the container at test time.
 func TestSSHKeyAuth(t *testing.T) {
@@ -599,20 +559,25 @@ func TestSSHAutoReconnect(t *testing.T) {
 		t.Fatalf("kill sshd: %v", err)
 	}
 
-	// Poll ssh_info until state goes through reconnecting/disconnected and back to connected.
+	// Poll ssh_list until state goes through reconnecting/disconnected and back to connected.
 	deadline := time.Now().Add(20 * time.Second)
 	var sawReconnecting bool
 	var finalState string
 	for time.Now().Before(deadline) {
-		var info sshConnectResp
-		if err := mc.CallJSON(ctx, "ssh_info", map[string]any{"id": "r1"}, &info); err != nil {
-			t.Fatalf("ssh_info: %v", err)
+		var rows []sshConnectResp
+		if err := mc.CallJSON(ctx, "ssh_list", nil, &rows); err != nil {
+			t.Fatalf("ssh_list: %v", err)
 		}
-		finalState = info.State
-		if info.State == "reconnecting" || info.State == "disconnected" {
+		finalState = ""
+		for _, s := range rows {
+			if s.ID == "r1" {
+				finalState = s.State
+			}
+		}
+		if finalState == "reconnecting" || finalState == "disconnected" {
 			sawReconnecting = true
 		}
-		if sawReconnecting && info.State == "connected" {
+		if sawReconnecting && finalState == "connected" {
 			break
 		}
 		time.Sleep(400 * time.Millisecond)
@@ -666,12 +631,9 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 		daemon.Stop()
 		t.Fatalf("connect: %v", err)
 	}
-	// Make sure the snapshot has actually been flushed.
-	if _, err := mc.Call(ctx, "snapshot", nil); err != nil {
-		mc.Close()
-		daemon.Stop()
-		t.Fatalf("snapshot: %v", err)
-	}
+	// daemon.Stop() flushes state synchronously on shutdown, so closing the
+	// client and stopping the daemon is itself the persistence fence — the
+	// old explicit snapshot tool is gone (issue #1).
 	mc.Close()
 	daemon.Stop()
 
@@ -968,9 +930,17 @@ func TestConcurrentReconnects(t *testing.T) {
 	// After the storm, session should be connected and exec should still work.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var info sshConnectResp
-		if err := mc.CallJSON(ctx, "ssh_info", map[string]any{"id": "rc"}, &info); err == nil && info.State == "connected" {
-			break
+		var rows []sshConnectResp
+		if err := mc.CallJSON(ctx, "ssh_list", nil, &rows); err == nil {
+			connected := false
+			for _, s := range rows {
+				if s.ID == "rc" && s.State == "connected" {
+					connected = true
+				}
+			}
+			if connected {
+				break
+			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -980,52 +950,6 @@ func TestConcurrentReconnects(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "survived") {
 		t.Fatalf("post-storm stdout %q", res.Stdout)
-	}
-}
-
-// TestTOONFormat starts the daemon with -format=toon (which is also the
-// production default) and confirms a tool result comes back as TOON text
-// rather than JSON. We don't try to parse TOON — just verify it's
-// shape-correct (an `items[N]{fields}:` header) and a few field tokens
-// appear, since the goal is to catch a regression where TOON encoding
-// silently falls back to JSON.
-func TestTOONFormat(t *testing.T) {
-	daemonBin := BuildDaemon(t)
-	if err := exec.Command("docker", "version").Run(); err != nil {
-		t.Skipf("docker not available: %v", err)
-	}
-	EnsureDockerImage(t)
-	sshd := StartSSHDContainer(t)
-	defer sshd.Stop()
-	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Format: "toon"})
-	defer daemon.Stop()
-
-	mc := NewMCPClientForDaemon(t, daemon)
-	defer mc.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "tn", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	text, err := mc.CallText(ctx, "ssh_list", nil)
-	if err != nil {
-		t.Fatalf("ssh_list: %v", err)
-	}
-	// Negative check: JSON output would parse as JSON. TOON does not.
-	var any any
-	if err := json.Unmarshal([]byte(text), &any); err == nil {
-		t.Fatalf("expected TOON output, got valid JSON:\n%s", text)
-	}
-	// TOON list output looks like `[1]{…}:` for a single-element array;
-	// must contain the session id and state.
-	if !strings.Contains(text, "tn") || !strings.Contains(text, "connected") {
-		t.Fatalf("TOON output missing expected tokens:\n%s", text)
-	}
-	// And it should use the json-tagged field names (snake_case), not Go's
-	// PascalCase, which would happen if json tags were ignored.
-	if !strings.Contains(text, "state") || strings.Contains(text, "ActiveAddress") {
-		t.Fatalf("TOON output not using json-tag field names:\n%s", text)
 	}
 }
 
@@ -1047,7 +971,6 @@ func TestDaemonEnsureAutoSpawns(t *testing.T) {
 		"-state", stateDir + "/state.json",
 		"-lock", stateDir + "/daemon.lock",
 		"-handle", handlePath,
-		"-format", "json",
 	})
 	if err != nil {
 		t.Fatalf("EnsureAt: %v", err)
@@ -1075,16 +998,12 @@ func TestDaemonEnsureAutoSpawns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	var status struct {
-		Uptime string `json:"uptime"`
+	// Proof of life: the auto-spawned daemon answers a real tool call.
+	var rows []sshConnectResp
+	if err := mc.CallJSON(ctx, "ssh_list", nil, &rows); err != nil {
+		t.Fatalf("ssh_list after auto-spawn: %v", err)
 	}
-	if err := mc.CallJSON(ctx, "status", nil, &status); err != nil {
-		t.Fatalf("status after auto-spawn: %v", err)
-	}
-	if status.Uptime == "" {
-		t.Fatalf("daemon did not auto-spawn (empty uptime)")
-	}
-	t.Logf("auto-spawned daemon uptime=%s", status.Uptime)
+	t.Logf("auto-spawned daemon answered ssh_list with %d sessions", len(rows))
 }
 
 func readPidFromLock(path string) (int, error) {

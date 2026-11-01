@@ -54,21 +54,10 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 		mcp.WithDescription("List all SSH sessions with state, addresses, and attached forwards/shells."),
 	), handleSSHList(st))
 
-	srv.AddTool(mcp.NewTool("ssh_info",
-		mcp.WithDescription("Detailed info for a single SSH session."),
-		mcp.WithString("id", mcp.Required(), mcp.Description("Session id.")),
-	), handleSSHInfo(st))
-
 	srv.AddTool(mcp.NewTool("ssh_reconnect",
-		mcp.WithDescription("Force re-dial of an SSH session, preserving its forwards (they will be re-bound)."),
+		mcp.WithDescription("Force re-dial of an SSH session."),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Session id to reconnect.")),
 	), handleSSHReconnect(st))
-
-	srv.AddTool(mcp.NewTool("ssh_clone",
-		mcp.WithDescription("Open a second independent SSH session reusing an existing session's config under a new id."),
-		mcp.WithString("source_id", mcp.Required(), mcp.Description("Existing session id to clone.")),
-		mcp.WithString("new_id", mcp.Required(), mcp.Description("New session id.")),
-	), handleSSHClone(st))
 
 	srv.AddTool(mcp.NewTool("ssh_exec",
 		mcp.WithDescription("Run a one-shot command on an SSH session. Each call uses a fresh channel and is bounded by a 30-second timeout — for anything long-running (builds, tails, deploys) open a persistent shell with ssh_shell_open instead, which has no timeout. timeout_ms raises the per-call cap (max 1h)."),
@@ -125,20 +114,6 @@ func handleSSHList(st *State) server.ToolHandlerFunc {
 	}
 }
 
-func handleSSHInfo(st *State) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id, err := req.RequireString("id")
-		if err != nil {
-			return resultErr(err)
-		}
-		s, err := st.SSH.Get(id)
-		if err != nil {
-			return resultErr(err)
-		}
-		return st.resultJSON(s.Info())
-	}
-}
-
 func handleSSHReconnect(st *State) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, err := req.RequireString("id")
@@ -149,25 +124,6 @@ func handleSSHReconnect(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		return st.resultJSON(s.Info())
-	}
-}
-
-func handleSSHClone(st *State) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		src, err := req.RequireString("source_id")
-		if err != nil {
-			return resultErr(err)
-		}
-		dst, err := req.RequireString("new_id")
-		if err != nil {
-			return resultErr(err)
-		}
-		s, err := st.SSH.CloneSession(src, dst)
-		if err != nil {
-			return resultErr(err)
-		}
-		_ = st.Persist()
 		return st.resultJSON(s.Info())
 	}
 }

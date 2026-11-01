@@ -32,13 +32,13 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 
 | Area | What |
 |-|-|
-| **SSH** | named long-lived sessions, multi-address try-in-order, ProxyJump-style jump hosts, `ssh-agent`/key/password auth, keepalive + auto-reconnect with backoff, persistent across daemon restart, `ssh_clone` |
+| **SSH** | named long-lived sessions, multi-address try-in-order, ProxyJump-style jump hosts, `ssh-agent`/key/password auth, keepalive + auto-reconnect with backoff, persistent across daemon restart |
 | **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls, write/read/resize/close, parallel-safe writes |
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
 | **Persistence** | session specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
 | **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. No auth token — the loopback guard (Host/Origin check) is the boundary. |
 | **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport) — the single MCP transport. |
-| **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`ssh_file_list`, etc.). `-format json` reverts to JSON for clients that prefer it. |
+| **Output** | tool results are JSON. |
 
 ## Run the daemon
 
@@ -96,7 +96,6 @@ The daemon takes no required flags. Environment overrides (also accepted as `-fl
 | `REMOTE_SHELL_MCP_STATE` | state file path |
 | `REMOTE_SHELL_MCP_LOCK` | lock file path |
 | `REMOTE_SHELL_MCP_HANDLE` | handle file path (where `{addr,pid}` is published) |
-| `REMOTE_SHELL_MCP_FORMAT` | tool result output: `toon` (default) or `json` |
 
 Defaults live in `$XDG_CONFIG_HOME/remote-shell-mcp/` (`~/.config/remote-shell-mcp/` on Linux, `~/Library/Application Support/remote-shell-mcp/` on macOS).
 
@@ -134,7 +133,7 @@ cmd/
 internal/
   sshx/                SSH manager, dial chain, PTY shells, SFTP, keepalive
   mcptools/            MCP tool registrations, debounced state flusher
-  state/               on-disk snapshot/restore
+  state/               on-disk session persistence/restore
   daemon/              pidfile lock, handle publish, loopback listener, auto-spawn (Ensure)
 test/e2e/              end-to-end tests + sshd container Dockerfile
 ```

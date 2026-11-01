@@ -42,14 +42,7 @@ func main() {
 	lockPath := flag.String("lock", envOr("REMOTE_SHELL_MCP_LOCK", ""), "Path to daemon lock file.")
 	handlePath := flag.String("handle", envOr("REMOTE_SHELL_MCP_HANDLE", ""), "Path to the handle file. Daemon writes {addr,pid} here after binding so clients can find it.")
 	logFmt := flag.String("log", envOr("REMOTE_SHELL_MCP_LOG", "text"), "Log format: text or json.")
-	outFmt := flag.String("format", envOr("REMOTE_SHELL_MCP_FORMAT", "toon"), "Tool-result output format: toon (default) or json. TOON is ~30-50% smaller for arrays of uniform objects (ssh_file_list, forward lists, etc.) — see https://github.com/toon-format/spec.")
 	flag.Parse()
-
-	format, err := mcptools.ParseFormat(*outFmt)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
 
 	defLock, defState, defHandle, err := daemon.DefaultPaths()
 	if err != nil {
@@ -120,7 +113,7 @@ func main() {
 		os.Exit(1)
 	}
 	sshMgr := sshx.NewManager()
-	st := &mcptools.State{SSH: sshMgr, Store: store, Log: log, Format: format}
+	st := &mcptools.State{SSH: sshMgr, Store: store, Log: log}
 
 	if snap, err := store.Load(); err != nil {
 		log.Warn("load state", "err", err)
@@ -158,7 +151,7 @@ func main() {
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", boundAddr, "mcp", "/mcp",
-			"state", store.Path(), "handle", *handlePath, "format", string(format))
+			"state", store.Path(), "handle", *handlePath)
 		errCh <- httpSrv.Serve(ln)
 	}()
 

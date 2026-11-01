@@ -125,14 +125,6 @@ func (m *Manager) Reconnect(id string) (*Session, error) {
 	return s, nil
 }
 
-func (m *Manager) CloneSession(srcID, newID string) (*Session, error) {
-	src, err := m.Get(srcID)
-	if err != nil {
-		return nil, err
-	}
-	return m.Connect(newID, src.Spec)
-}
-
 func (m *Manager) List() []SessionInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

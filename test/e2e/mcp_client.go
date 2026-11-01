@@ -21,8 +21,8 @@ import (
 // returns the raw CallToolResult JSON, CallText unwraps the first text
 // content block, CallJSON unmarshals it into a struct.
 type MCPClient struct {
-	t *testing.T
-	c *mcpclient.Client
+	t  *testing.T
+	c  *mcpclient.Client
 	tr *transport.StreamableHTTP
 }
 
