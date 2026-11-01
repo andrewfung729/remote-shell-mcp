@@ -44,11 +44,12 @@ type execResp struct {
 	ExitCode int    `json:"exit_code"`
 }
 
-func sshSpec(port int) map[string]any {
+func sshSpec(t *testing.T, port int) map[string]any {
+	t.Helper()
 	return map[string]any{
 		"user":               sshUser,
 		"addresses":          []string{fmt.Sprintf("127.0.0.1:%d", port)},
-		"auth":               map[string]any{"password": sshPassword},
+		"auth":               keyAuth(t),
 		"insecure":           true,
 		"timeout":            "10s",
 		"disable_ssh_config": true,
@@ -82,7 +83,7 @@ func TestSSHConnectAndExec(t *testing.T) {
 	var info sshConnectResp
 	if err := mc.CallJSON(ctx, "ssh_connect", map[string]any{
 		"id":   "s1",
-		"spec": sshSpec(sshd.SSHPort),
+		"spec": sshSpec(t, sshd.SSHPort),
 	}, &info); err != nil {
 		t.Fatalf("ssh_connect: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestSSHPersistentShell(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	if _, err := mc.Call(ctx, "ssh_shell_open", map[string]any{"session_id": "s1", "shell_id": "sh1"}); err != nil {
@@ -178,7 +179,7 @@ func TestSFTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	content := "hello sftp from e2e\n"
@@ -243,7 +244,7 @@ func TestSFTPFullCoverage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "f1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "f1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
@@ -380,7 +381,7 @@ func TestSSHLocalForwardHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
@@ -432,7 +433,7 @@ func TestSSHRemoteForwardHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
@@ -504,7 +505,7 @@ func TestSSHDynamicForwardSOCKS5(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
@@ -551,8 +552,8 @@ func TestSSHDynamicForwardSOCKS5(t *testing.T) {
 
 // TestSSHJumpHost exercises ProxyJump-style multi-hop: connect via the
 // container's sshd as a jump, then SSH to 127.0.0.1:22 INSIDE the container
-// (which loops back through the same sshd). The bastion auth happens with
-// the test's password; the terminal hop also uses password auth.
+// (which loops back through the same sshd). Both hops authenticate with the
+// suite key installed into the container at start.
 func TestSSHJumpHost(t *testing.T) {
 	mc, sshd, _, teardown := setupSession(t)
 	defer teardown()
@@ -564,13 +565,13 @@ func TestSSHJumpHost(t *testing.T) {
 		// Final target is reached via the jump's perspective, so 127.0.0.1:22
 		// resolves on the jump host (= the container itself).
 		"addresses": []string{"127.0.0.1:22"},
-		"auth":      map[string]any{"password": sshPassword},
+		"auth":      keyAuth(t),
 		"insecure":  true,
 		"jump_hosts": []map[string]any{
 			{
 				"user":      sshUser,
 				"addresses": []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-				"auth":      map[string]any{"password": sshPassword},
+				"auth":      keyAuth(t),
 				"insecure":  true,
 			},
 		},
@@ -601,7 +602,7 @@ func TestSSHMultiAddress(t *testing.T) {
 	spec := map[string]any{
 		"user":      sshUser,
 		"addresses": []string{"127.0.0.1:1", fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":      map[string]any{"password": sshPassword},
+		"auth":      keyAuth(t),
 		"insecure":  true,
 		"timeout":   "2s",
 	}
@@ -625,7 +626,7 @@ func TestSSHClone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "orig", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "orig", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	if _, err := mc.Call(ctx, "ssh_clone", map[string]any{"source_id": "orig", "new_id": "twin"}); err != nil {
@@ -657,6 +658,8 @@ func TestSSHClone(t *testing.T) {
 	}
 }
 
+// TestSSHKeyAuth exercises per-spec key auth: a fresh ephemeral keypair
+// (not the baked-in suite key) installed into the container at test time.
 func TestSSHKeyAuth(t *testing.T) {
 	mc, sshd, _, teardown := setupSession(t)
 	defer teardown()
@@ -753,7 +756,7 @@ func TestSSHAutoReconnect(t *testing.T) {
 	spec := map[string]any{
 		"user":           sshUser,
 		"addresses":      []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":           map[string]any{"password": sshPassword},
+		"auth":           keyAuth(t),
 		"insecure":       true,
 		"timeout":        "10s",
 		"keepalive":      "1s",
@@ -820,14 +823,11 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 	sshd := StartSSHDContainer(t)
 	defer sshd.Stop()
 
-	privPath, pub := GenerateKey(t)
-	InstallAuthorizedKey(t, sshd, pub)
-
 	stateDir := t.TempDir()
 	statePath := stateDir + "/state.json"
 	lockPath := stateDir + "/daemon.lock"
 
-	// Phase 1 — connect a persistent session with key auth.
+	// Phase 1 — connect a persistent session with the suite key.
 	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
 	mc := NewMCPClientForDaemon(t, daemon)
 
@@ -837,7 +837,7 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 	spec := map[string]any{
 		"user":       sshUser,
 		"addresses":  []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":       map[string]any{"key_path": privPath},
+		"auth":       keyAuth(t),
 		"insecure":   true,
 		"timeout":    "10s",
 		"persistent": true,
@@ -923,7 +923,7 @@ func TestManyParallelSessions(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := fmt.Sprintf("p%d", i)
-			if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": id, "spec": sshSpec(sshd.SSHPort)}); err != nil {
+			if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": id, "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 				errs <- fmt.Errorf("%s connect: %w", id, err)
 				return
 			}
@@ -965,15 +965,15 @@ func TestManyParallelSessions(t *testing.T) {
 // daemon side runs N handler goroutines), TestConcurrentShellWrites, and
 // TestConcurrentReconnects.
 
-// TestLargeMCPResponse drives a tool that returns a multi-megabyte payload to
-// confirm /rpc handles big JSON-RPC bodies without a scanner/buffer cap.
+// TestLargeMCPResponse drives a tool that returns a multi-megabyte payload
+// to confirm /mcp handles big JSON-RPC bodies without a scanner/buffer cap.
 func TestLargeMCPResponse(t *testing.T) {
 	mc, sshd, _, teardown := setupSession(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "big", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "big", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
@@ -1025,7 +1025,7 @@ func TestConnectDisconnectRace(t *testing.T) {
 			go func() {
 				_, _ = mc.Call(ctx, "ssh_connect", map[string]any{
 					"id":   id,
-					"spec": sshSpec(sshd.SSHPort),
+					"spec": sshSpec(t, sshd.SSHPort),
 				})
 				close(connectDone)
 			}()
@@ -1059,7 +1059,7 @@ func TestConcurrentShellWrites(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "c1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "c1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	if _, err := mc.Call(ctx, "ssh_shell_open", map[string]any{"session_id": "c1", "shell_id": "sh"}); err != nil {
@@ -1125,7 +1125,7 @@ func TestConcurrentReconnects(t *testing.T) {
 	spec := map[string]any{
 		"user":           sshUser,
 		"addresses":      []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":           map[string]any{"password": sshPassword},
+		"auth":           keyAuth(t),
 		"insecure":       true,
 		"timeout":        "5s",
 		"keepalive":      "1s",
@@ -1186,7 +1186,7 @@ func TestTOONFormat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "tn", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "tn", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	text, err := mc.CallText(ctx, "ssh_list", nil)
@@ -1361,7 +1361,7 @@ func TestDaemonSurvivesClientReconnect(t *testing.T) {
 	defer cancel()
 
 	mc := NewMCPClientForDaemon(t, daemon)
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "persist1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "persist1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
 		mc.Close()
 		t.Fatalf("connect: %v", err)
 	}
@@ -1386,5 +1386,101 @@ func TestDaemonSurvivesClientReconnect(t *testing.T) {
 	if !found {
 		raw, _ := json.Marshal(list)
 		t.Fatalf("session did not survive client reconnect; ssh_list=%s", string(raw))
+	}
+}
+
+// TestStreamableClientReconnectAcrossDaemonRestart keeps ONE MCP client
+// object (one streamable-HTTP transport, one MCP session) alive across a
+// full daemon restart — the scenario that is most likely to surprise us in
+// the streamable transport, since the client caches a session id the new
+// daemon never issued.
+//
+// What we verified while writing this test (worth knowing before touching
+// transport config): the daemon's /mcp server uses mcp-go's default
+// StatelessGeneratingSessionIdManager, which validates session-id *format*
+// only, not existence. So a stale session id from the dead daemon is still
+// accepted by the new one — re-running the initialize handshake on the same
+// transport (Reinitialize) revives the client in place without ever seeing a
+// 404/ErrSessionTerminated. That is exactly how a reconnecting remote MCP
+// client recovers here.
+//
+// The bearer token also rotates across restarts; the client's headerFunc
+// re-reads the handle file per request so it picks up the new token
+// automatically (matters when -require-auth or a non-loopback bind is in
+// play).
+func TestStreamableClientReconnectAcrossDaemonRestart(t *testing.T) {
+	daemonBin := BuildDaemon(t)
+	if err := exec.Command("docker", "version").Run(); err != nil {
+		t.Skipf("docker not available: %v", err)
+	}
+	EnsureDockerImage(t)
+	sshd := StartSSHDContainer(t)
+	defer sshd.Stop()
+
+	// Both daemons share state/lock/handle paths so the restart looks like a
+	// real one: same files, fresh process, fresh token.
+	stateDir := t.TempDir()
+	opts := DaemonOpts{
+		StatePath:  stateDir + "/state.json",
+		LockPath:   stateDir + "/daemon.lock",
+		HandlePath: stateDir + "/daemon.json",
+	}
+
+	daemon1 := StartDaemonWith(t, daemonBin, opts)
+	addr := daemon1.Addr()
+	handlePath := daemon1.HandlePath()
+
+	// Client bound to the addr string + handle path, not the Daemon struct —
+	// it must outlive the daemon it connected to.
+	mc := NewMCPClientForAddr(t, addr, handlePath)
+	defer mc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "restart", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
+		t.Fatalf("connect on daemon1: %v", err)
+	}
+	var res execResp
+	if err := mc.CallJSON(ctx, "ssh_exec", map[string]any{"session_id": "restart", "command": "echo pre-restart"}, &res); err != nil {
+		t.Fatalf("exec on daemon1: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "pre-restart") {
+		t.Fatalf("pre-restart stdout %q", res.Stdout)
+	}
+	sid1 := mc.SessionID()
+	if sid1 == "" {
+		t.Fatal("expected a negotiated MCP session id")
+	}
+
+	// Bounce the daemon in place: SIGTERM, then start a fresh process on the
+	// same addr so the client's URL still points at the new server.
+	daemon1.Stop()
+	opts.Addr = addr
+	daemon2 := StartDaemonWith(t, daemonBin, opts)
+	defer daemon2.Stop()
+	if daemon2.Addr() != addr {
+		t.Fatalf("daemon2 bound to %s, want same addr %s", daemon2.Addr(), addr)
+	}
+
+	// The transport is untouched: same session id, same URL. A stale-session
+	// request should still reach the server (session ids are stateless), but
+	// the proper client-side recovery is to re-handshake — do that, and
+	// confirm the client object is usable again.
+	mc.Reinitialize()
+	if sid2 := mc.SessionID(); sid2 == "" {
+		t.Fatal("no session id after re-initialize")
+	}
+
+	// Non-persistent sessions don't survive a restart; reconnect and prove
+	// the revived client can drive real work end to end.
+	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "restart2", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
+		t.Fatalf("connect on daemon2 via reused client: %v", err)
+	}
+	if err := mc.CallJSON(ctx, "ssh_exec", map[string]any{"session_id": "restart2", "command": "echo post-restart"}, &res); err != nil {
+		t.Fatalf("exec on daemon2 via reused client: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "post-restart") {
+		t.Fatalf("post-restart stdout %q", res.Stdout)
 	}
 }

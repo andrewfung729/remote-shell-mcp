@@ -3,145 +3,139 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// MCPClient is a test MCP client that talks to the daemon's /rpc endpoint
-// over plain HTTP. There is no stdio launcher anymore — the daemon is the
-// only binary and serves a one-shot JSON-RPC POST endpoint, so a test client
-// is just an HTTP POST with a bearer token.
+// MCPClient wraps the mcp-go library client over the spec Streamable HTTP
+// transport, talking to the daemon's /mcp endpoint — the same path a real MCP
+// client takes (there is no stdio launcher). The Call/CallText/CallJSON
+// helpers keep test call sites identical to the old /rpc-era client: Call
+// returns the raw CallToolResult JSON, CallText unwraps the first text
+// content block, CallJSON unmarshals it into a struct.
 type MCPClient struct {
-	t     *testing.T
-	url   string
-	token string
-	hc    *http.Client
-
-	nextID atomic.Int64
-	closed atomic.Bool
+	t *testing.T
+	c *mcpclient.Client
+	tr *transport.StreamableHTTP
 }
 
-// NewMCPClientForDaemon connects a test client to a running daemon. The
-// bearer token is read from the daemon's handle file.
+// NewMCPClientForDaemon connects a streamable-HTTP MCP client to a running
+// daemon at http://<addr>/mcp. Loopback binds skip bearer auth, but we pass
+// the handle-file token anyway so this client also works against a
+// -require-auth daemon, same as a remote client would.
 func NewMCPClientForDaemon(t *testing.T, d *Daemon) *MCPClient {
 	t.Helper()
-	token, err := daemon_ReadHandle(d.handlePath)
+	tr, err := transport.NewStreamableHTTP(
+		"http://"+d.addr+"/mcp",
+		transport.WithHTTPHeaderFunc(func(ctx context.Context) map[string]string {
+			// Resolve the token per-request instead of capturing it at
+			// connect time: after a daemon restart the handle file holds a
+			// fresh token, and a headerFunc picks it up without rebuilding
+			// the transport.
+			token, err := daemon_ReadHandle(d.handlePath)
+			if err != nil || token == "" {
+				return nil
+			}
+			return map[string]string{"Authorization": "Bearer " + token}
+		}),
+	)
 	if err != nil {
-		t.Fatalf("read daemon handle for token: %v", err)
+		t.Fatalf("new streamable transport: %v", err)
 	}
-	c := &MCPClient{
-		t:     t,
-		url:   "http://" + d.addr + "/rpc",
-		token: token,
-		hc:    &http.Client{Timeout: 0},
-	}
-	c.initialize()
-	return c
+	c := mcpclient.NewClient(tr)
+	mc := &MCPClient{t: t, c: c, tr: tr}
+	mc.initialize()
+	return mc
 }
 
-// do posts a single JSON-RPC message and returns the raw result. Notifications
-// (no id) return nil — /rpc answers them with 204 No Content.
-func (c *MCPClient) do(ctx context.Context, payload any) (json.RawMessage, error) {
-	if c.closed.Load() {
-		return nil, fmt.Errorf("client closed")
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("rpc http %d: %s", resp.StatusCode, string(body))
-	}
-	var env struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, fmt.Errorf("decode rpc response: %w (body: %s)", err, string(body))
-	}
-	if env.Error != nil {
-		return nil, fmt.Errorf("rpc error: %s", string(*env.Error))
-	}
-	return env.Result, nil
+// NewMCPClientForAddr is like NewMCPClientForDaemon but takes an addr +
+// handle path directly — for tests that keep the MCP client alive across a
+// daemon restart, where the client object must outlive any Daemon handle.
+func NewMCPClientForAddr(t *testing.T, addr, handlePath string) *MCPClient {
+	t.Helper()
+	return NewMCPClientForDaemon(t, &Daemon{addr: addr, handlePath: handlePath})
 }
 
 func (c *MCPClient) initialize() {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	id := c.nextID.Add(1)
-	if _, err := c.do(ctx, map[string]any{
-		"jsonrpc": "2.0", "id": id, "method": "initialize",
-		"params": map[string]any{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "e2e", "version": "1"},
-		},
-	}); err != nil {
+	if err := c.c.Start(ctx); err != nil {
+		c.t.Fatalf("client start: %v", err)
+	}
+	var req mcp.InitializeRequest
+	req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	req.Params.ClientInfo = mcp.Implementation{Name: "e2e", Version: "1"}
+	if _, err := c.c.Initialize(ctx, req); err != nil {
 		c.t.Fatalf("initialize: %v", err)
 	}
-	_, _ = c.do(ctx, map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
 }
 
+// Reinitialize performs the MCP initialize handshake again without rebuilding
+// the transport. Used by the daemon-restart test: the new daemon keeps the
+// client's session id valid (the server's session-id manager is stateless —
+// it validates format, not existence), so a re-handshake revives the client
+// in place, which is exactly what a reconnecting real-world client does.
+func (c *MCPClient) Reinitialize() {
+	c.initialize()
+}
+
+// SessionID returns the negotiated MCP session id ("" until initialize).
+// Only valid while the underlying transport is a StreamableHTTP.
+func (c *MCPClient) SessionID() string {
+	return c.tr.GetSessionId()
+}
+
+// Call invokes a tool and returns the raw CallToolResult as JSON — same
+// shape the old /rpc client returned from a tools/call request.
 func (c *MCPClient) Call(ctx context.Context, tool string, args map[string]any) (json.RawMessage, error) {
 	c.t.Helper()
+	var req mcp.CallToolRequest
+	req.Params.Name = tool
 	if args == nil {
 		args = map[string]any{}
 	}
-	id := c.nextID.Add(1)
-	return c.do(ctx, map[string]any{
-		"jsonrpc": "2.0", "id": id, "method": "tools/call",
-		"params": map[string]any{"name": tool, "arguments": args},
-	})
+	req.Params.Arguments = args
+	res, err := c.c.CallTool(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		return nil, fmt.Errorf("marshal tool result: %w", err)
+	}
+	return raw, nil
 }
 
 func (c *MCPClient) CallText(ctx context.Context, tool string, args map[string]any) (string, error) {
-	raw, err := c.Call(ctx, tool, args)
+	var req mcp.CallToolRequest
+	req.Params.Name = tool
+	if args == nil {
+		args = map[string]any{}
+	}
+	req.Params.Arguments = args
+	res, err := c.c.CallTool(ctx, req)
 	if err != nil {
 		return "", err
 	}
-	var result struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		IsError bool `json:"isError"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", err
-	}
-	if len(result.Content) == 0 {
+	if len(res.Content) == 0 {
 		return "", nil
 	}
-	if result.IsError {
-		return result.Content[0].Text, fmt.Errorf("tool error: %s", result.Content[0].Text)
+	var text string
+	if tc, ok := res.Content[0].(mcp.TextContent); ok {
+		text = tc.Text
 	}
-	return result.Content[0].Text, nil
+	if res.IsError {
+		return text, fmt.Errorf("tool error: %s", text)
+	}
+	return text, nil
 }
 
 func (c *MCPClient) CallJSON(ctx context.Context, tool string, args map[string]any, out any) error {
@@ -155,6 +149,8 @@ func (c *MCPClient) CallJSON(ctx context.Context, tool string, args map[string]a
 	return json.Unmarshal([]byte(text), out)
 }
 
+// Close terminates the MCP session (DELETE to /mcp) and releases the
+// transport's resources.
 func (c *MCPClient) Close() {
-	c.closed.Store(true)
+	_ = c.c.Close()
 }

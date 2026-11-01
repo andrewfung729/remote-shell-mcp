@@ -44,9 +44,11 @@ workflow rules).
 - One binary only. Do not reintroduce a stdio launcher or per-client config
   registrar (ADR-0002); new transports belong on the daemon's HTTP server.
 - E2E tests live behind the `e2e` build tag, run real sshd (via a
-  Docker container as test fixture), and talk to the daemon over HTTP
-  `/rpc` — not stdio. Prefer them over mocks when changing `sshx`
-  behavior.
+  Docker container as test fixture), and talk to the daemon's `/mcp`
+  endpoint through the mcp-go streamable HTTP client — the same path a real
+  MCP client takes. The sshd image authenticates fixtures via an ephemeral
+  ed25519 suite key (no password auth). Prefer e2e tests over mocks when
+  changing `sshx` behavior.
 - Module path is still `github.com/jaenster/remote-shell-mcp` (upstream
   name kept so imports don't churn); repo/issue tracker is
   `andrewfung729/remote-shell-mcp`.

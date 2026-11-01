@@ -113,14 +113,16 @@ Requires Docker. First run builds a small `alpine + openssh + busybox-httpd` tes
 go test -race -tags e2e -count=1 ./test/e2e/
 ```
 
-The suite (30+ tests, race-clean) exercises:
+The suite (30+ tests, race-clean) drives the daemon through the spec
+Streamable HTTP `/mcp` endpoint using the mcp-go client (same path a real
+MCP client takes) and exercises:
 
-- Auth: password, key file, ssh-agent, daemon bearer token (incl. case-insensitive scheme)
+- Auth: ephemeral key file (suite fixture + per-test keypairs), ssh-agent, daemon bearer token (incl. case-insensitive scheme)
 - SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, clone, auto-reconnect after sshd kill, persistence across full daemon restart
 - Forwards: `-L` via real `http.Get`, `-R` with the container `curl`ing back to a Go server in the test process, `-D` SOCKS5 via `golang.org/x/net/proxy`
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
 - Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
-- Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, 2 MiB MCP response round-trip
+- Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
 - Auth: 401 path with multiple `Bearer` casings, 0600 token file mode
 
 ## Project layout

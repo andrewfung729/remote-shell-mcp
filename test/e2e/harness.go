@@ -28,7 +28,6 @@ import (
 const (
 	imageTag       = "remote-shell-mcp-test-sshd:latest"
 	containerLabel = "remote-shell-mcp-e2e=1"
-	sshPassword    = "testpassword"
 	sshUser        = "root"
 )
 
@@ -88,6 +87,62 @@ func EnsureDockerImage(t *testing.T) {
 	}
 }
 
+var (
+	suiteKeyOnce sync.Once
+	suiteKeyErr  error
+	suiteKeyPriv string // private key path
+	suiteKeyPub  string // authorized_keys line
+)
+
+// SuiteKey returns the suite-wide ephemeral ed25519 keypair. Generated once
+// per `go test` invocation into a process-level temp dir (t.TempDir would be
+// torn down by the first caller, but the same key is shared by every test).
+// The private key path goes into ssh_connect specs as auth.key_path; the
+// public half is installed into each test container by StartSSHDContainer
+// (or ad-hoc via InstallAuthorizedKey).
+func SuiteKey(t *testing.T) (privPath, pubAuthorized string) {
+	t.Helper()
+	suiteKeyOnce.Do(func() {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			suiteKeyErr = fmt.Errorf("ed25519: %w", err)
+			return
+		}
+		sshPub, err := ssh.NewPublicKey(pub)
+		if err != nil {
+			suiteKeyErr = fmt.Errorf("ssh pub: %w", err)
+			return
+		}
+		suiteKeyPub = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
+		pemBlock, err := ssh.MarshalPrivateKey(priv, "")
+		if err != nil {
+			suiteKeyErr = fmt.Errorf("marshal priv: %w", err)
+			return
+		}
+		dir, err := os.MkdirTemp("", "remote-shell-mcp-e2e-key-")
+		if err != nil {
+			suiteKeyErr = fmt.Errorf("mktemp for suite key: %w", err)
+			return
+		}
+		suiteKeyPriv = filepath.Join(dir, "id_ed25519")
+		if err := os.WriteFile(suiteKeyPriv, pem.EncodeToMemory(pemBlock), 0o600); err != nil {
+			suiteKeyErr = fmt.Errorf("write priv: %w", err)
+		}
+	})
+	if suiteKeyErr != nil {
+		t.Fatalf("suite key: %v", suiteKeyErr)
+	}
+	return suiteKeyPriv, suiteKeyPub
+}
+
+// keyAuth returns the auth map that goes in an ssh_connect spec — key auth
+// against the suite key installed into each test container.
+func keyAuth(t *testing.T) map[string]any {
+	t.Helper()
+	priv, _ := SuiteKey(t)
+	return map[string]any{"key_path": priv}
+}
+
 // SweepStaleContainers removes any leftover containers from previous failed
 // runs of this suite. Invoked from setupSession-style helpers to keep CI clean.
 func SweepStaleContainers() {
@@ -108,8 +163,14 @@ type SSHDContainer struct {
 	t       *testing.T
 }
 
+// StartSSHDContainer launches the test sshd container and installs the
+// ephemeral suite key into /root/.ssh/authorized_keys. The key lives in the
+// container, not the image: the suite key regenerates per `go test` run,
+// while the image is cached across runs — baking it in would pin the image
+// to a key that no longer exists on the next run.
 func StartSSHDContainer(t *testing.T) *SSHDContainer {
 	t.Helper()
+	_, pub := SuiteKey(t)
 	args := []string{"run", "-d", "--rm",
 		"--label", containerLabel,
 		"-p", "127.0.0.1::22",
@@ -127,6 +188,7 @@ func StartSSHDContainer(t *testing.T) *SSHDContainer {
 		t.Fatalf("get sshd port: %v", err)
 	}
 	c.SSHPort = port
+	InstallAuthorizedKey(t, c, pub)
 	if err := waitForSSH(port); err != nil {
 		c.Stop()
 		t.Fatalf("wait for sshd: %v", err)
@@ -209,6 +271,7 @@ type Daemon struct {
 }
 
 type DaemonOpts struct {
+	Addr        string // override bind addr; empty = pick a free loopback port
 	StatePath   string
 	LockPath    string
 	HandlePath  string
@@ -224,8 +287,10 @@ func StartDaemon(t *testing.T, daemonBin string) *Daemon {
 
 func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 	t.Helper()
-	port := PickFreePort(t)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := opts.Addr
+	if addr == "" {
+		addr = fmt.Sprintf("127.0.0.1:%d", PickFreePort(t))
+	}
 	dir := t.TempDir()
 	if opts.StatePath == "" {
 		opts.StatePath = filepath.Join(dir, "state.json")
