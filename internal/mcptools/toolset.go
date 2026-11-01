@@ -70,13 +70,6 @@ func (t *ToolToggler) Set(name string, enabled bool) bool {
 	return true
 }
 
-// IsDisabled reports whether a registered tool is currently off.
-func (t *ToolToggler) IsDisabled(name string) bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.disabled[name]
-}
-
 // DisabledNames returns the list of disabled tool names (for persistence).
 func (t *ToolToggler) DisabledNames() []string {
 	t.mu.RLock()

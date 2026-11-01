@@ -58,7 +58,7 @@ remote-shell-mcpd
 
 On first run it binds the fixed loopback port `127.0.0.1:47180` and
 writes `{addr, pid}` to `daemon.json` in the config dir so clients can
-find it. Point any remote-MCP client at `http://127.0.0.1:47180/mcp` — no
+find it. Point any MCP client at `http://127.0.0.1:47180/mcp` — no
 auth header needed. If the port is already taken the daemon exits non-zero;
 override with `-addr`/`REMOTE_SHELL_MCP_ADDR` (loopback only — a
 non-loopback address is rejected at startup).

@@ -143,6 +143,11 @@ type connectReq struct {
 	Spec sshx.ConnectSpec `json:"spec"`
 }
 
+// idReq is the {id} body the single-session mutations share.
+type idReq struct {
+	ID string `json:"id"`
+}
+
 func (d *Deps) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var req connectReq
 	if !decode(w, r, &req) {
@@ -153,7 +158,10 @@ func (d *Deps) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := d.SSH.Connect(req.ID, req.Spec); err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		// A rejected spec (bad fields, refused credential) or an unknown
+		// session is a client error; a dial that simply failed upstream is
+		// closer to 502 — but both are the caller's problem, so report 400.
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	d.persist()
@@ -161,9 +169,7 @@ func (d *Deps) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) handleDisconnect(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID string `json:"id"`
-	}
+	var req idReq
 	if !decode(w, r, &req) {
 		return
 	}
@@ -176,9 +182,7 @@ func (d *Deps) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) handleReconnect(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID string `json:"id"`
-	}
+	var req idReq
 	if !decode(w, r, &req) {
 		return
 	}

@@ -73,10 +73,11 @@ func hostAllowed(host, boundPort string) bool {
 	if !localOriginNames[name] && !isLoopbackIP(name) {
 		return false
 	}
-	// When we know the bound port, a Host that carries a port must match it.
-	// A Host with no port is still allowed (clients often send bare
-	// "localhost" against a non-80 service).
-	return boundPort == "" || port == "" || port == boundPort
+	// The Host must carry the bound port. A bare "localhost" implies the
+	// scheme's default port (80/443), which is NOT the daemon's port — a
+	// rebind to another local process on :80 would otherwise pass. Native
+	// clients and browsers always send the explicit port.
+	return boundPort == "" || port == boundPort
 }
 
 // originAllowed reports whether an Origin header is same-origin with the
@@ -105,7 +106,11 @@ func originAllowed(origin, boundPort string) bool {
 	if !localOriginNames[name] && !isLoopbackIP(name) {
 		return false
 	}
-	return boundPort == "" || port == "" || port == boundPort
+	// Same-origin requires the same port. A port-less Origin resolves to the
+	// scheme's default (80/443), which is a different origin from the
+	// daemon's bound port — a page served by another local process on :80
+	// would otherwise slip through. Browsers always send the explicit port.
+	return boundPort == "" || port == boundPort
 }
 
 func isLoopbackIP(name string) bool {

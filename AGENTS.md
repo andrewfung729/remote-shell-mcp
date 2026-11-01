@@ -6,8 +6,8 @@ session/shell state and serves `/mcp` (spec Streamable HTTP)
 on a fixed loopback port (default `127.0.0.1:47180`). Binds are
 loopback-only — a non-loopback address is rejected at startup and there
 is no auth token.
-There is no stdio launcher — the direction is a remote-MCP server + Mac app
-(ADR-0002). Package map: README.md "Project layout".
+There is no stdio launcher — the product is a local-only daemon with an
+embedded WebUI (ADR-0004). Package map: README.md "Project layout".
 
 ## Commands
 
@@ -44,6 +44,9 @@ workflow rules).
   `*_impl.go`, not `*_unix.go`.
 - One binary only. Do not reintroduce a stdio launcher or per-client config
   registrar (ADR-0002); new transports belong on the daemon's HTTP server.
+- Tool-set scope rule (ADR-0005): a capability belongs only if it makes the
+  remote host usable as a local tool — run commands, hold a shell, move
+  files. Judge additions against that, not per feature.
 - E2E tests live behind the `e2e` build tag, run real sshd (via a
   Docker container as test fixture), and talk to the daemon's `/mcp`
   endpoint through the mcp-go streamable HTTP client — the same path a real

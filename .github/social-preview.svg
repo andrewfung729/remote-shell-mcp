@@ -29,25 +29,25 @@
   <text x="80" y="220" font-size="76" font-weight="700" fill="#f0f6fc" letter-spacing="-2">remote-shell-mcp</text>
 
   <!-- Tagline line 1 -->
-  <text x="80" y="290" font-size="32" font-weight="500" fill="#8b949e">Persistent SSH, SFTP, port forwards, and Docker</text>
+  <text x="80" y="290" font-size="32" font-weight="500" fill="#8b949e">Persistent SSH, PTY shells, and SFTP</text>
   <text x="80" y="334" font-size="32" font-weight="500" fill="#8b949e">over the Model Context Protocol.</text>
 
   <!-- Box / accent -->
-  <text x="80" y="430" font-size="22" fill="#3fb950">$ remote-shell-mcp setup</text>
-  <text x="80" y="466" font-size="20" fill="#7d8590">Detected Claude Code / Desktop / Cursor / Codex CLI.</text>
-  <text x="80" y="494" font-size="20" fill="#7d8590">Install into all? [Y/n] _</text>
+  <text x="80" y="430" font-size="22" fill="#3fb950">$ remote-shell-mcpd</text>
+  <text x="80" y="466" font-size="20" fill="#7d8590">listening on 127.0.0.1:47180 — /mcp + WebUI</text>
+  <text x="80" y="494" font-size="20" fill="#7d8590">point your MCP client at http://127.0.0.1:47180/mcp _</text>
 
   <!-- Right-side tags -->
   <g font-size="18" fill="#79c0ff">
     <text x="1190" y="160" text-anchor="end">SSH</text>
     <text x="1190" y="200" text-anchor="end">SFTP</text>
-    <text x="1190" y="240" text-anchor="end">-L  -R  -D</text>
-    <text x="1190" y="280" text-anchor="end">Docker</text>
-    <text x="1190" y="320" text-anchor="end">PTY shells</text>
+    <text x="1190" y="240" text-anchor="end">PTY shells</text>
+    <text x="1190" y="280" text-anchor="end">jump hosts</text>
+    <text x="1190" y="320" text-anchor="end">agent forwarding</text>
     <text x="1190" y="360" text-anchor="end">auto-reconnect</text>
     <text x="1190" y="400" text-anchor="end">survives restarts</text>
   </g>
 
   <!-- Footer -->
-  <text x="80" y="600" font-size="18" fill="#6e7681">github.com/jaenster/remote-shell-mcp · MIT</text>
+  <text x="80" y="600" font-size="18" fill="#6e7681">github.com/andrewfung729/remote-shell-mcp · MIT</text>
 </svg>

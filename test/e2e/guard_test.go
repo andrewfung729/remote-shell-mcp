@@ -78,6 +78,15 @@ func TestGuardRejectsSpoofedHost(t *testing.T) {
 	if code := httpReq(t, d, "GET", "/", "127.0.0.1:1", "", "", ""); code != http.StatusForbidden {
 		t.Fatalf("wrong-port Host = %d, want 403", code)
 	}
+	// A port-less loopback Host resolves to the default port, not the
+	// daemon's — a rebind to another local process on :80 must not pass.
+	if code := httpReq(t, d, "GET", "/", "127.0.0.1", "", "", ""); code != http.StatusForbidden {
+		t.Fatalf("port-less Host = %d, want 403", code)
+	}
+	// A port-less loopback Origin (implicit :80/:443) is a different origin.
+	if code := httpReq(t, d, "GET", "/", d.Addr(), "http://127.0.0.1", "", ""); code != http.StatusForbidden {
+		t.Fatalf("port-less Origin = %d, want 403", code)
+	}
 }
 
 func TestGuardAllowsNativeClient(t *testing.T) {

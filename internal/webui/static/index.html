@@ -106,7 +106,7 @@ async function loadSessions(){
       tr.innerHTML='<td><b>'+esc(s.id)+'</b></td><td class="state-'+esc(s.state)+'">'+esc(s.state)+'</td>'+
         '<td>'+esc(s.user)+'@'+esc((s.active_address||(s.addresses||[])[0]||''))+'</td><td>'+flags+'</td><td>'+shells+'</td>'+
         '<td class="muted">'+esc(s.last_error||'')+'</td>'+
-        '<td><button data-a="reconnect">reconnect</button> <button class="danger" data-a="disconnect">disconnect</button></td>';
+        '<td><button data-a="reconnect">reconnect</button> <button data-a="edit">edit</button> <button class="danger" data-a="disconnect">disconnect</button></td>';
       tr.querySelectorAll('button').forEach(b=>b.onclick=()=>act(s.id,b.dataset.a));
       tb.appendChild(tr);
     }
@@ -114,6 +114,18 @@ async function loadSessions(){
 }
 async function act(id,a){
   $('#msg').textContent='';
+  if(a==='edit'){
+    // Edit = disconnect + reconnect under a new spec, in one action. The
+    // current spec is prefilled so the user only changes what they need.
+    const cur=(await api('GET','/sessions')).find(s=>s.id===id);
+    if(!cur){$('#msg').textContent='session gone';return}
+    const nj=prompt('New spec JSON for "'+id+'" (user/addresses/auth/flags):',JSON.stringify({user:cur.user,addresses:cur.addresses,auth:{use_agent:true},persistent:cur.persistent,auto_reconnect:cur.auto_reconnect,forward_agent:cur.forward_agent}));
+    if(!nj)return;
+    let spec;try{spec=JSON.parse(nj)}catch(e){$('#msg').textContent='bad JSON: '+e.message;return}
+    try{await api('POST','/sessions/disconnect',{id});await api('POST','/sessions/connect',{id,spec});loadSessions()}
+    catch(e){$('#msg').textContent=e.message}
+    return;
+  }
   try{await api('POST','/sessions/'+a,{id});loadSessions()}catch(e){$('#msg').textContent=e.message}
 }
 $('#add-form').onsubmit=async ev=>{
@@ -130,7 +142,12 @@ $('#add-form').onsubmit=async ev=>{
   try{await api('POST','/sessions/connect',{id:$('#f-id').value,spec});ev.target.reset();loadSessions()}
   catch(e){$('#msg').textContent=e.message}
 };
-function group(name){const m=name.match(/^ssh_(connect|disconnect|list|reconnect|exec)/)?'session':name.startsWith('ssh_shell')?'shell':name.startsWith('ssh_file')||name.startsWith('ssh_upload')||name.startsWith('ssh_download')?'file':'other';return m}
+function group(name){
+  if(/^ssh_(connect|disconnect|list|reconnect)$/.test(name))return'session';
+  if(/^ssh_exec$/.test(name))return'exec';
+  if(name.startsWith('ssh_shell'))return'shell';
+  if(name.startsWith('ssh_file')||name==='ssh_upload'||name==='ssh_download')return'file';
+  return'other'}
 async function loadTools(){
   try{const tools=await api('GET','/tools');
     tools.sort((a,b)=>a.name.localeCompare(b.name));

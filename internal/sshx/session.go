@@ -237,11 +237,9 @@ type SessionInfo struct {
 	AutoReconnect bool      `json:"auto_reconnect"`
 }
 
-// SessionRow is the compact, primitive-only projection used by ssh_list and
-// status — every field is a scalar so TOON can emit the array in its compact
-// tabular form (`[N]{fields}: row,row,row`) instead of the expanded
-// per-element form. Detailed nested info (addresses list, shells) is
-// available via ssh_info.
+// SessionRow is the compact, primitive-only projection used by ssh_list:
+// every field is a flat scalar so the list renders as a clean table. The
+// full SessionInfo (addresses, shells) lives on the session itself.
 type SessionRow struct {
 	ID            string `json:"id"`
 	User          string `json:"user"`
