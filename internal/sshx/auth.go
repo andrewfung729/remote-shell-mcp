@@ -41,6 +41,17 @@ func (cl closerList) Close() {
 // the caller, even on error — Build closes its own state on error paths but
 // the caller must close on the happy path too.
 func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
+	// Secrets are rejected outright: a persistent session must be
+	// restorable after a daemon restart, and a password or key passphrase
+	// can't be persisted. Rejecting here (rather than silently ignoring the
+	// field) tells the caller exactly how to fix the request.
+	if a.Password != "" {
+		return nil, nil, errors.New("password auth is not supported: use key_path or use_agent")
+	}
+	if a.KeyPassphrase != "" {
+		return nil, nil, errors.New("key_passphrase is not supported: load the encrypted key into ssh-agent (ssh-add) and use use_agent, or point key_path at an unencrypted key")
+	}
+
 	var methods []ssh.AuthMethod
 	var closers closerList
 
@@ -76,12 +87,7 @@ func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 			// reconnaissance. Log the path on the daemon if you need details.
 			return nil, nil, fmt.Errorf("read private key: %w", err)
 		}
-		var signer ssh.Signer
-		if a.KeyPassphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase(data, []byte(a.KeyPassphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey(data)
-		}
+		signer, err := ssh.ParsePrivateKey(data)
 		if err != nil {
 			closers.Close()
 			return nil, nil, fmt.Errorf("parse private key: %w", err)
@@ -89,13 +95,9 @@ func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 		methods = append(methods, ssh.PublicKeys(signer))
 	}
 
-	if a.Password != "" {
-		methods = append(methods, ssh.Password(a.Password))
-	}
-
 	if len(methods) == 0 {
 		closers.Close()
-		return nil, nil, errors.New("no authentication method provided (set key_path, use_agent, or password)")
+		return nil, nil, errors.New("no authentication method provided (set key_path or use_agent)")
 	}
 	return methods, closers, nil
 }

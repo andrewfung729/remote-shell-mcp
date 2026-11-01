@@ -32,7 +32,7 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 
 | Area | What |
 |-|-|
-| **SSH** | named long-lived sessions, multi-address try-in-order, ProxyJump-style jump hosts, `ssh-agent`/key/password auth, keepalive + auto-reconnect with backoff, persistent across daemon restart |
+| **SSH** | named long-lived sessions, multi-address try-in-order, ProxyJump-style jump hosts, `ssh-agent`/key auth only (password and key passphrase are rejected — they can't be persisted for restore), keepalive + auto-reconnect with backoff, persistent across daemon restart |
 | **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls, write/read/resize/close, parallel-safe writes |
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
 | **Persistence** | session specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |

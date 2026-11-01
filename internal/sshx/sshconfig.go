@@ -67,7 +67,7 @@ func resolveFromSSHConfig(spec *ConnectSpec) {
 
 	// Auth: only fill if no auth method is explicit. Otherwise the caller's
 	// explicit choice wins entirely.
-	if spec.Auth.KeyPath == "" && !spec.Auth.UseAgent && spec.Auth.Password == "" {
+	if spec.Auth.KeyPath == "" && !spec.Auth.UseAgent {
 		if ag := nonEmpty(ssh_config.Get(alias, "IdentityAgent")); ag != "" {
 			spec.Auth.UseAgent = true
 			spec.Auth.AgentSocket = expandHome(ag)

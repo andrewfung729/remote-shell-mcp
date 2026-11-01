@@ -101,6 +101,51 @@ func TestSSHConnectAndExec(t *testing.T) {
 	}
 }
 
+// TestSSHConnectRejectsSecrets verifies password and key_passphrase are
+// refused with a corrective message — they can't be persisted for restore,
+// so the daemon rejects them instead of silently ignoring them. No sshd
+// needed: the rejection happens before any dial.
+func TestSSHConnectRejectsSecrets(t *testing.T) {
+	daemonBin := BuildDaemon(t)
+	daemon := StartDaemon(t, daemonBin)
+	defer daemon.Stop()
+	mc := NewMCPClientForDaemon(t, daemon)
+	defer mc.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	base := map[string]any{
+		"user":               "someone",
+		"addresses":          []string{"127.0.0.1:22"},
+		"insecure":           true,
+		"disable_ssh_config": true,
+	}
+
+	// password is rejected, naming key_path/use_agent.
+	spec := map[string]any{}
+	for k, v := range base {
+		spec[k] = v
+	}
+	spec["auth"] = map[string]any{"password": "hunter2"}
+	_, err := mc.CallText(ctx, "ssh_connect", map[string]any{"id": "pw", "spec": spec})
+	if err == nil || !strings.Contains(err.Error(), "password") ||
+		!(strings.Contains(err.Error(), "key_path") || strings.Contains(err.Error(), "use_agent")) {
+		t.Fatalf("password not rejected with corrective error, got: %v", err)
+	}
+
+	// key_passphrase is rejected, pointing at ssh-agent.
+	spec2 := map[string]any{}
+	for k, v := range base {
+		spec2[k] = v
+	}
+	spec2["auth"] = map[string]any{"key_path": "/tmp/k", "key_passphrase": "secret"}
+	_, err2 := mc.CallText(ctx, "ssh_connect", map[string]any{"id": "pp", "spec": spec2})
+	if err2 == nil || !strings.Contains(err2.Error(), "key_passphrase") ||
+		!strings.Contains(err2.Error(), "agent") {
+		t.Fatalf("key_passphrase not rejected with corrective error, got: %v", err2)
+	}
+}
+
 func TestSSHPersistentShell(t *testing.T) {
 	mc, sshd, _, teardown := setupSession(t)
 	defer teardown()

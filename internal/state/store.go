@@ -107,14 +107,3 @@ func (s *Store) Save(snap *Snapshot) error {
 	}
 	return nil
 }
-
-func ScrubSSH(spec sshx.ConnectSpec) sshx.ConnectSpec {
-	out := spec
-	out.Auth.Password = ""
-	out.Auth.KeyPassphrase = ""
-	for i := range out.JumpHosts {
-		out.JumpHosts[i].Auth.Password = ""
-		out.JumpHosts[i].Auth.KeyPassphrase = ""
-	}
-	return out
-}

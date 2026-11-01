@@ -15,7 +15,7 @@ func Capture(ssh *sshx.Manager) *Snapshot {
 		}
 		snap.SSHSessions = append(snap.SSHSessions, SSHSessionRecord{
 			ID:   s.ID,
-			Spec: ScrubSSH(s.Spec),
+			Spec: s.Spec,
 		})
 	}
 

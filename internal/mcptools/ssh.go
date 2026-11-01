@@ -11,7 +11,7 @@ import (
 
 func RegisterSSH(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_connect",
-		mcp.WithDescription("Open a named, long-lived SSH session. Supports multiple addresses (tried in order — e.g. [lan-ip, wan-host]), ProxyJump-style jump hosts, and key/agent/password auth. Returns the session id and connection state."),
+		mcp.WithDescription("Open a named, long-lived SSH session. Supports multiple addresses (tried in order — e.g. [lan-ip, wan-host]), ProxyJump-style jump hosts, and key/agent auth. Returns the session id and connection state."),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Identifier for this session. Reuse it in subsequent ssh_* tool calls.")),
 		mcp.WithObject("spec", mcp.Required(),
 			mcp.Description("Connection spec."),
@@ -20,13 +20,11 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 				"addresses": map[string]any{"type": "array", "description": "Hosts to try in order, each \"host\" or \"host:port\". Required.", "items": map[string]any{"type": "string"}},
 				"auth": map[string]any{
 					"type":        "object",
-					"description": "Authentication. Provide at least one of: key_path, use_agent, password.",
+					"description": "Authentication. Provide at least one of: key_path, use_agent. Password and key_passphrase are rejected — they can't be persisted for restore.",
 					"properties": map[string]any{
-						"key_path":       map[string]any{"type": "string", "description": "Path to private key on the daemon host."},
-						"key_passphrase": map[string]any{"type": "string", "description": "Passphrase for the private key, if any."},
-						"use_agent":      map[string]any{"type": "boolean", "description": "Use ssh-agent for auth. Reads SSH_AUTH_SOCK unless agent_socket is set."},
-						"agent_socket":   map[string]any{"type": "string", "description": "Explicit path to an ssh-agent unix socket. Required when SSH_AUTH_SOCK isn't propagated to the daemon (e.g. 1Password agent at ~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock). Supports leading ~/."},
-						"password":       map[string]any{"type": "string", "description": "Password auth (not persisted across daemon restart)."},
+						"key_path":     map[string]any{"type": "string", "description": "Path to private key on the daemon host."},
+						"use_agent":    map[string]any{"type": "boolean", "description": "Use ssh-agent for auth. Reads SSH_AUTH_SOCK unless agent_socket is set."},
+						"agent_socket": map[string]any{"type": "string", "description": "Explicit path to an ssh-agent unix socket. Required when SSH_AUTH_SOCK isn't propagated to the daemon (e.g. 1Password agent at ~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock). Supports leading ~/."},
 					},
 				},
 				"jump_hosts": map[string]any{
@@ -38,8 +36,8 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 				"known_hosts_path": map[string]any{"type": "string", "description": "Override default ~/.ssh/known_hosts location."},
 				"timeout":          map[string]any{"type": "string", "description": "Per-dial timeout, e.g. \"15s\". Default 15s."},
 				"keepalive":        map[string]any{"type": "string", "description": "SSH keepalive interval, e.g. \"30s\". Enables drop detection. Required for auto_reconnect to fire."},
-				"auto_reconnect":   map[string]any{"type": "boolean", "description": "Re-dial automatically when keepalive notices a drop, with exponential backoff. Forwards are re-bound after reconnect."},
-				"persistent":       map[string]any{"type": "boolean", "description": "Survive daemon restart. Spec is rehydrated on startup; secrets (password, key_passphrase) are scrubbed and must be re-resolvable from disk/agent."},
+				"auto_reconnect":   map[string]any{"type": "boolean", "description": "Re-dial automatically when keepalive notices a drop, with exponential backoff."},
+				"persistent":       map[string]any{"type": "boolean", "description": "Survive daemon restart. Spec is rehydrated on startup; auth must be re-resolvable from disk/agent (key_path or use_agent)."},
 				"forward_agent":    map[string]any{"type": "boolean", "description": "Enable SSH agent forwarding to the remote session."},
 			}),
 		),
@@ -51,7 +49,7 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 	), handleSSHDisconnect(st))
 
 	srv.AddTool(mcp.NewTool("ssh_list",
-		mcp.WithDescription("List all SSH sessions with state, addresses, and attached forwards/shells."),
+		mcp.WithDescription("List all SSH sessions with state, addresses, and shells."),
 	), handleSSHList(st))
 
 	srv.AddTool(mcp.NewTool("ssh_reconnect",
