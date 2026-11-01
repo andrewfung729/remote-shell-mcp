@@ -1,7 +1,22 @@
 # ADR-0002: Pivot to remote-MCP daemon + Mac app, drop stdio client surface
 
-- **Status**: accepted
+- **Status**: partially superseded by ADR-0004
 - **Date**: 2026-08-26
+
+> **Superseded sections** (kept for history — see ADR-0004 for current
+> truth): the Mac-app direction and the "remote MCP" positioning are dropped
+> in favour of a local-only daemon with an embedded WebUI; the auto-spawn
+> helper kept "for the Mac app" is deleted; the `/rpc` one-shot endpoint
+> described as the "primary e2e transport" is deleted; the interim auth
+> model (loopback open, bearer on non-loopback) is replaced by the
+> Host/Origin guard; every "Still unresolved" item is closed (OAuth/TLS out
+> of scope, Mac app moot, daemon-dials-out answered by local-only). The
+> Consequences paragraph that names the removed SSE endpoint as current is
+> stale.
+>
+> **What still holds**: removal of the stdio launcher, client-config
+> registrar and curl installer; one binary; the spec Streamable HTTP
+> transport at `/mcp`.
 
 ## Context
 
@@ -46,8 +61,10 @@ Delete the client-facing stdio surface and keep only the daemon:
 
 ## Consequences
 
-- **One binary**: `remote-shell-mcpd`. The daemon serves `/rpc` (+ `/sse`,
-  `/message`) behind bearer auth on a kernel-picked loopback port.
+- **One binary**: `remote-shell-mcpd`. (Historical: it then served `/rpc`
+  + `/sse`, `/message` behind bearer auth on a kernel-picked loopback port.
+  All of those were later removed — see ADR-0004: `/mcp` is now the single
+  transport on a fixed loopback port with no auth token.)
 - **Current MCP clients cannot connect over stdio anymore.** Until a
   Streamable HTTP server + OAuth land, the only working transports are
   `/rpc` POST and the SSE endpoint — both need the bearer token, not a

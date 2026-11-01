@@ -3,6 +3,14 @@
 - **Status**: accepted
 - **Date**: 2026-11-01
 
+> **Amended 2026-11-02**: two claims no longer hold after the issue-#1
+> refocus. (a) "Kept: `Snapshot.docker_hosts`" — the field is now deleted;
+> old state files are not migrated (unknown keys are ignored by the decoder,
+> so a stale `docker_hosts` entry simply drops, with no warn-log). (b) The
+> Context's framing of the product as "remote-MCP daemon + Mac app" is
+> superseded by ADR-0004 — the product is a local-only daemon with a WebUI.
+> The decision to remove Docker and its rationale still stand.
+
 ## Context
 
 Upstream ships a full Docker toolbox: `internal/dockerx` (a manager that

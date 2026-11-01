@@ -68,5 +68,6 @@ release:
     ## remote-shell-mcp {{ .Tag }}
 
     Single daemon binary (remote-shell-mcpd). Download the archive for your
-    platform, run it, then point your MCP client at the published /rpc or
-    /sse endpoint with the bearer token from daemon.json.
+    platform, run it, then point your MCP client at the /mcp Streamable HTTP
+    endpoint (default http://127.0.0.1:47180/mcp), or open the same address in
+    a browser for the WebUI. Loopback-only; no auth token needed.

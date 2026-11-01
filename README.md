@@ -1,9 +1,9 @@
 # remote-shell-mcp
 
-[![Latest release](https://img.shields.io/github/v/release/jaenster/remote-shell-mcp?logo=github&label=release&color=blue)](https://github.com/jaenster/remote-shell-mcp/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/jaenster/remote-shell-mcp/test.yml?branch=main&label=tests)](https://github.com/jaenster/remote-shell-mcp/actions/workflows/test.yml)
-[![License](https://img.shields.io/github/license/jaenster/remote-shell-mcp?color=informational)](LICENSE)
-[![Go](https://img.shields.io/github/go-mod/go-version/jaenster/remote-shell-mcp?logo=go)](go.mod)
+[![Latest release](https://img.shields.io/github/v/release/andrewfung729/remote-shell-mcp?logo=github&label=release&color=blue)](https://github.com/andrewfung729/remote-shell-mcp/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/andrewfung729/remote-shell-mcp/test.yml?branch=main&label=tests)](https://github.com/andrewfung729/remote-shell-mcp/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/andrewfung729/remote-shell-mcp?color=informational)](LICENSE)
+[![Go](https://img.shields.io/github/go-mod/go-version/andrewfung729/remote-shell-mcp?logo=go)](go.mod)
 
 **Persistent SSH, PTY shells, and SFTP over the [Model Context Protocol](https://modelcontextprotocol.io). Open the connection once — sessions and PTY shells survive across Claude Code / Claude Desktop / Cursor / Codex CLI restarts.**
 
@@ -14,7 +14,7 @@
 It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the keepalive on a flaky link, all keep running.
 
 > **This fork** runs the daemon as a local-only MCP server (see
-> docs/adr/0002). The stdio launcher, per-client `setup` registrar, and curl
+> docs/adr/0004). The stdio launcher, per-client `setup` registrar, and curl
 > installer have been removed. The daemon serves the spec Streamable HTTP
 > transport at `/mcp` on a fixed loopback port. Loopback-only binds are
 > enforced at startup — there is no auth token and no way to expose the
@@ -51,7 +51,7 @@ go build -o bin/remote-shell-mcpd ./cmd/remote-shell-mcpd
 ```
 
 ```
-# Or via Go:
+# Or via Go (module path kept from upstream):
 go install github.com/jaenster/remote-shell-mcp/cmd/remote-shell-mcpd@latest
 remote-shell-mcpd
 ```
@@ -63,18 +63,18 @@ auth header needed. If the port is already taken the daemon exits non-zero;
 override with `-addr`/`REMOTE_SHELL_MCP_ADDR` (loopback only — a
 non-loopback address is rejected at startup).
 
-A headless/bootstrap caller can also bring a daemon up on demand via
-`daemon.Ensure(binary, args)` in-process — the same helper the future Mac
-app uses — but there is no stdio launcher binary to exec from an MCP host.
+There is no stdio launcher and no auto-spawn helper — the daemon is a
+single long-lived process you start once (e.g. via your service manager or a
+login item) and point every client at.
 
 ## How it compares
 
-| Approach | Sessions | Tunnels (`-L`/`-R`/`-D`) | PTY shell state | SFTP | ssh_config / 1Password / agent forwarding |
-|-|-|-|-|-|-|-|
-| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | n/a | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
-| Stdio MCPs that wrap `ssh` per call | Re-dialed for every tool call; nothing survives | Not practical (per-call lifetime) | None (no persistent shell) | Usually missing | Usually missing | Inherits whatever the shell wrapper does |
-| Running `ssh` from a generic Bash MCP | Re-dialed per call | Awkward via `nohup ssh -fN -L …`; you manage the lifetime | None | Via shelling out to `scp`/`rsync` | Manual |
-| `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a | n/a |
+| Approach | Sessions | PTY shell state | SFTP | ssh_config / 1Password / agent forwarding |
+|-|-|-|-|-|
+| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
+| Stdio MCPs that wrap `ssh` per call | Re-dialed for every tool call; nothing survives | None (no persistent shell) | Usually missing | Usually missing |
+| Running `ssh` from a generic Bash MCP | Re-dialed per call | None | Via shelling out to `scp`/`rsync` | Manual |
+| `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a |
 
 Practical consequence: `remote-shell-mcp` lets a model open a session in the morning, run a `tail -f` in a `ssh_shell` for hours, and have all of it still working after the client restarts twice and your laptop went to sleep.
 

@@ -4,9 +4,34 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
 
 ## Unreleased
 
+- **Refocused the product on "remote host as local MCP tools"** (issue #1;
+  ADR-0004 local-only daemon + WebUI, ADR-0005 product-scope rule). See the
+  sub-bullets below.
+- **Local-only daemon.** Fixed loopback port `127.0.0.1:47180` (was a
+  kernel-picked random port); startup rejects a non-loopback `-addr` and
+  exits non-zero on port conflict — no random-port fallback. A Host/Origin
+  guard now wraps the whole HTTP mux (loopback Host on the bound port,
+  same-origin Origin, `application/json` required for `/api` POSTs).
+- **WebUI.** New `internal/webui` package: a plain HTML/vanilla-JS page at
+  `/` plus `/api` (status, sessions, connect/disconnect/reconnect, tool
+  list + on/off). Per-tool toggles apply to MCP clients instantly via
+  `tools/list_changed` and persist in the state file. No build step.
+- **Removed** (per the ADR-0005 scope rule): all port forwarding
+  (-L/-R/-D + persistence), session cloning, the status/snapshot/info
+  tools, the TOON output format (results are JSON only), password and
+  key-passphrase auth, the `/rpc` endpoint + bearer token +
+  `-require-auth`, non-loopback binding, the auto-spawn helper, assorted
+  dead code, and the Docker-era state field.
+- **Auth narrowed** to key-file and ssh-agent only; `ssh_connect` rejects a
+  password or key passphrase with a corrective error. The state file can
+  never hold a secret, so every persistent session is restorable.
+- **Released binaries now report their real version** — the
+  `-X main.version={{.Version}}` ldflag previously named a variable that
+  didn't exist; `var version = "dev"` is now injected.
+
 - **Fork: removed Docker support.** Deleted `internal/dockerx` and all `docker_*` MCP tools (connect/list/exec/shell/run/images/upload/download). `mcptools.State` drops the `Docker` field; `state.Capture`/`Restore` take only the SSH manager. `Snapshot.docker_hosts` is retained as `json.RawMessage` so old state files still parse — a warn-log notes the count and skips them. The moby/docker dependency tree is gone (`go mod tidy` also dropped the orphaned `go-toml` from the earlier setup removal).
 - **Fork: dropped Windows and FreeBSD support.** This fork targets macOS and Linux only. Removed `install.ps1`, the Windows daemon lock (`LockFileEx`) and spawn-detach implementations, all `runtime.GOOS == "windows"` branches, and the Windows/FreeBSD/armv7/riscv64 release and CI matrices. Supported targets: darwin amd64/arm64/universal, linux amd64/arm64. (Resolves upstream jaenster/remote-shell-mcp#1 by removing the affected surface rather than fixing the PowerShell 302 bug — Windows install is no longer offered.)
-- **Fork: removed the stdio client surface — daemon-only, heading for remote-MCP + Mac app.** Deleted `cmd/remote-shell-mcp` (stdio launcher, `setup` subcommand, one-shot CLI), `internal/launcher/proxy.go`, `internal/setup/` (client config registrar), `install.sh`, and the `install-smoke` CI. The daemon auto-spawn helper moved to `internal/daemon/spawn.go` (`Ensure`/`EnsureAt`); e2e now talks to the daemon over HTTP `/rpc` instead of spawning a stdio launcher. **Note**: MCP clients that only speak stdio can no longer connect — a spec-compliant Streamable HTTP transport + remote auth are not built yet (see docs/adr/0002).
+- **Fork: removed the stdio client surface — daemon-only, heading for remote-MCP + Mac app.** Deleted `cmd/remote-shell-mcp` (stdio launcher, `setup` subcommand, one-shot CLI), `internal/launcher/proxy.go`, `internal/setup/` (client config registrar), `install.sh`, and the `install-smoke` CI. The daemon auto-spawn helper moved to `internal/daemon/spawn.go` (`Ensure`/`EnsureAt`); e2e then talked to the daemon over HTTP `/rpc` instead of spawning a stdio launcher. (Superseded: `/rpc` was later removed — `/mcp` is now the single transport, and remote auth/OAuth were dropped for a local-only Host/Origin guard; see ADR-0004.)
 
 ## v0.1.8 — 2026-05-14
 
