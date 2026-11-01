@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -276,8 +275,7 @@ type DaemonOpts struct {
 	LockPath    string
 	HandlePath  string
 	Env         []string
-	Format      string // override -format flag; empty = json (test default)
-	RequireAuth bool   // force bearer auth on the loopback bind (-require-auth)
+	Format     string // override -format flag; empty = json (test default)
 }
 
 func StartDaemon(t *testing.T, daemonBin string) *Daemon {
@@ -318,9 +316,6 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 	} else {
 		cmd.Args = append(cmd.Args, "-format", "json")
 	}
-	if opts.RequireAuth {
-		cmd.Args = append(cmd.Args, "-require-auth")
-	}
 	cmd.Env = append(os.Environ(), opts.Env...)
 	var stderr bytes.Buffer
 	cmd.Stdout = os.Stderr
@@ -339,23 +334,6 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 }
 
 func (d *Daemon) HandlePath() string { return d.handlePath }
-
-// daemon_ReadHandle is a test-only wrapper that reads the bearer token out of
-// the daemon's handle file. We hand-parse the JSON (rather than importing
-// internal/daemon) to keep this build-tagged file's dependencies thin.
-func daemon_ReadHandle(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	var h struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(data, &h); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(h.Token), nil
-}
 
 func (d *Daemon) Addr() string { return d.addr }
 

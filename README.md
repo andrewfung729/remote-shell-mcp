@@ -13,18 +13,18 @@
 
 It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the SOCKS proxy you set up to reach a database, the keepalive on a flaky link, all keep running.
 
-> **This fork is mid-pivot** to a remote-MCP server + Mac app (see
+> **This fork** runs the daemon as a local-only MCP server (see
 > docs/adr/0002). The stdio launcher, per-client `setup` registrar, and curl
-> installer have been removed. The daemon now serves the spec Streamable
-> HTTP transport at `/mcp` plus a one-shot `/rpc` POST endpoint. Loopback
-> binds are unauthenticated (local clients and the embedded WebUI are
-> trusted); a non-loopback bind still requires the bearer token.
+> installer have been removed. The daemon serves the spec Streamable HTTP
+> transport at `/mcp` on a fixed loopback port. Loopback-only binds are
+> enforced at startup — there is no auth token and no way to expose the
+> daemon on the network.
 
 ```
-┌──────────────┐   remote MCP (HTTP)   ┌────────────────────────┐
+┌──────────────┐   streamable HTTP    ┌────────────────────────┐
 │ MCP client   │ ◀──────────────────▶ │ remote-shell-mcpd      │
-│ (registers   │    Bearer token      │ daemon: SSH sessions,  │
-│  a URL)      │                      │ port forwards          │
+│ (registers   │   127.0.0.1:47180    │ daemon: SSH sessions,  │
+│  a URL)      │      /mcp            │ port forwards          │
 └──────────────┘                      └────────────────────────┘
 ```
 
@@ -37,8 +37,8 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 | **Port forwards** | `-L`, `-R`, `-D` (SOCKS5); local forwards auto-rebound after reconnect; 30s per-conn dial timeout |
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
 | **Persistence** | session and forward specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
-| **Auth** | 32-byte random Bearer token, rotated each daemon restart, stored 0600 in the same config dir. Loopback binds skip auth by default (`-require-auth` to force); non-loopback always requires it. |
-| **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport); `/rpc` one-shot JSON-RPC POST. |
+| **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. No auth token — the loopback guard (Host/Origin check) is the boundary. |
+| **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport) — the single MCP transport. |
 | **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`ssh_file_list`, forward lists, etc.). `-format json` reverts to JSON for clients that prefer it. |
 
 ## Run the daemon
@@ -57,11 +57,12 @@ go install github.com/jaenster/remote-shell-mcp/cmd/remote-shell-mcpd@latest
 remote-shell-mcpd
 ```
 
-On first run it binds a kernel-picked loopback port, generates a bearer
-token, and writes `{addr, token, pid}` to `daemon.json` in the config dir
-so clients can find it. On a loopback bind, point any remote-MCP client at
-`http://<addr>/mcp` — no auth header needed. For one-shot calls,
-`http://<addr>/rpc` takes a plain JSON-RPC POST.
+On first run it binds the fixed loopback port `127.0.0.1:47180` and
+writes `{addr, pid}` to `daemon.json` in the config dir so clients can
+find it. Point any remote-MCP client at `http://127.0.0.1:47180/mcp` — no
+auth header needed. If the port is already taken the daemon exits non-zero;
+override with `-addr`/`REMOTE_SHELL_MCP_ADDR` (loopback only — a
+non-loopback address is rejected at startup).
 
 A headless/bootstrap caller can also bring a daemon up on demand via
 `daemon.Ensure(binary, args)` in-process — the same helper the future Mac
@@ -93,17 +94,21 @@ The daemon takes no required flags. Environment overrides (also accepted as `-fl
 
 | Variable | Effect |
 |-|-|
-| `REMOTE_SHELL_MCP_ADDR` | bind address (default `127.0.0.1:0`, a kernel-picked free port) |
+| `REMOTE_SHELL_MCP_ADDR` | bind address (default `127.0.0.1:47180`, a fixed loopback port; loopback only) |
 | `REMOTE_SHELL_MCP_STATE` | state file path |
 | `REMOTE_SHELL_MCP_LOCK` | lock file path |
-| `REMOTE_SHELL_MCP_HANDLE` | handle file path (where `{addr,token,pid}` is published) |
+| `REMOTE_SHELL_MCP_HANDLE` | handle file path (where `{addr,pid}` is published) |
 | `REMOTE_SHELL_MCP_FORMAT` | tool result output: `toon` (default) or `json` |
 
 Defaults live in `$XDG_CONFIG_HOME/remote-shell-mcp/` (`~/.config/remote-shell-mcp/` on Linux, `~/Library/Application Support/remote-shell-mcp/` on macOS).
 
-## Auth
+## Bind safety
 
-The daemon generates a fresh 32-byte random token on startup and publishes it in `daemon.json` (mode 0600). Requests to a **non-loopback** bind require `Authorization: Bearer <token>` (RFC 7235 case-insensitive scheme; constant-time compare) — unauthenticated requests get `401 Unauthorized`. On loopback binds auth is skipped by default (the threat model is any local process already owns you; `-require-auth` forces the check anyway). A client reads the token from the handle file before connecting, so a daemon restart that rotates the token just means re-reading the file.
+The daemon only ever binds loopback. A non-loopback `-addr` is rejected at
+startup and a taken port exits non-zero — there is no way to accidentally
+expose command execution to the network. On loopback there is no auth token;
+the Host/Origin guard on the HTTP mux is what keeps a hostile web page from
+driving the daemon.
 
 ## End-to-end tests
 
@@ -117,13 +122,12 @@ The suite (30+ tests, race-clean) drives the daemon through the spec
 Streamable HTTP `/mcp` endpoint using the mcp-go client (same path a real
 MCP client takes) and exercises:
 
-- Auth: ephemeral key file (suite fixture + per-test keypairs), ssh-agent, daemon bearer token (incl. case-insensitive scheme)
+- Auth: ephemeral key file (suite fixture + per-test keypairs), ssh-agent
 - SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, clone, auto-reconnect after sshd kill, persistence across full daemon restart
 - Forwards: `-L` via real `http.Get`, `-R` with the container `curl`ing back to a Go server in the test process, `-D` SOCKS5 via `golang.org/x/net/proxy`
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
 - Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
 - Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
-- Auth: 401 path with multiple `Bearer` casings, 0600 token file mode
 
 ## Project layout
 
@@ -134,7 +138,7 @@ internal/
   sshx/                SSH manager, dial chain, forwards, PTY shells, SFTP, keepalive
   mcptools/            MCP tool registrations, debounced state flusher
   state/               on-disk snapshot/restore
-  daemon/              pidfile lock, auth token, handle publish, /rpc endpoint, auto-spawn (Ensure)
+  daemon/              pidfile lock, handle publish, loopback listener, auto-spawn (Ensure)
 test/e2e/              end-to-end tests + sshd container Dockerfile
 ```
 

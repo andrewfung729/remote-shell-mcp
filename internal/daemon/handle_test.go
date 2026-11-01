@@ -10,7 +10,7 @@ func TestWriteReadHandleRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.json")
 
-	want := Handle{Addr: "127.0.0.1:54321", Token: "abc123", PID: 99}
+	want := Handle{Addr: "127.0.0.1:54321", PID: 99}
 	if err := WriteHandle(path, want); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -21,8 +21,8 @@ func TestWriteReadHandleRoundTrip(t *testing.T) {
 	if got != want {
 		t.Fatalf("round trip: got %+v want %+v", got, want)
 	}
-	// Permissions should be 0600 so the bearer token doesn't leak to other
-	// users on multi-user boxes.
+	// Permissions should be 0600 — the handle names a live local process,
+	// no need for other users to read it on multi-user boxes.
 	info, _ := os.Stat(path)
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("handle perms: got %o want 0600", info.Mode().Perm())
@@ -32,12 +32,12 @@ func TestWriteReadHandleRoundTrip(t *testing.T) {
 func TestReadHandleRejectsMissingFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.json")
-	// addr-only — a client would have nothing to authenticate with.
-	if err := os.WriteFile(path, []byte(`{"addr":"127.0.0.1:1"}`), 0o600); err != nil {
+	// PID-only — a client would have nowhere to connect.
+	if err := os.WriteFile(path, []byte(`{"pid":42}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadHandle(path); err == nil {
-		t.Fatalf("expected error for handle missing token")
+		t.Fatalf("expected error for handle missing addr")
 	}
 }
 
@@ -58,8 +58,8 @@ func TestWriteHandleAtomicReplace(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.json")
 
-	first := Handle{Addr: "127.0.0.1:1", Token: "t1", PID: 1}
-	second := Handle{Addr: "127.0.0.1:2", Token: "t2", PID: 2}
+	first := Handle{Addr: "127.0.0.1:1", PID: 1}
+	second := Handle{Addr: "127.0.0.1:2", PID: 2}
 
 	if err := WriteHandle(path, first); err != nil {
 		t.Fatal(err)

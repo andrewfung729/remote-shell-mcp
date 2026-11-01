@@ -24,23 +24,25 @@ import (
 )
 
 const (
-	// Default addr binds the loopback to a kernel-picked free port. The actual
-	// bound address is written to daemon.json so clients can find us without
-	// hard-coding any port — sidesteps the well-known-port conflict (the
-	// previous default, 7800, is JGroups/JBoss).
-	defaultAddr = "127.0.0.1:0"
+	// Default addr binds loopback on a fixed high port so clients can point at
+	// a stable, bookmarkable URL. 47180 is unassigned (no IANA service) and
+	// obscure enough to dodge common dev-port collisions; if it IS taken the
+	// daemon refuses to start rather than silently picking another port — a
+	// client registered against the default must never find a different
+	// daemon. Pass -addr/REMOTE_SHELL_MCP_ADDR to override (tests use :0 or
+	// explicit addrs).
+	defaultAddr = "127.0.0.1:47180"
 	serverName  = "remote-shell-mcp"
 	serverVer   = "0.1.0"
 )
 
 func main() {
-	addr := flag.String("addr", envOr("REMOTE_SHELL_MCP_ADDR", defaultAddr), "Bind address for the SSE MCP server (host:port). Port 0 means \"pick a free port\".")
+	addr := flag.String("addr", envOr("REMOTE_SHELL_MCP_ADDR", defaultAddr), "Bind address for the MCP server (host:port). Loopback only — non-loopback binds are rejected. Port 0 means \"pick a free port\" (tests).")
 	statePath := flag.String("state", envOr("REMOTE_SHELL_MCP_STATE", ""), "Path to state.json (default: $XDG_CONFIG_HOME/remote-shell-mcp/state.json).")
 	lockPath := flag.String("lock", envOr("REMOTE_SHELL_MCP_LOCK", ""), "Path to daemon lock file.")
-	handlePath := flag.String("handle", envOr("REMOTE_SHELL_MCP_HANDLE", ""), "Path to the handle file. Daemon writes {addr,token,pid} here after binding so clients can find it.")
+	handlePath := flag.String("handle", envOr("REMOTE_SHELL_MCP_HANDLE", ""), "Path to the handle file. Daemon writes {addr,pid} here after binding so clients can find it.")
 	logFmt := flag.String("log", envOr("REMOTE_SHELL_MCP_LOG", "text"), "Log format: text or json.")
 	outFmt := flag.String("format", envOr("REMOTE_SHELL_MCP_FORMAT", "toon"), "Tool-result output format: toon (default) or json. TOON is ~30-50% smaller for arrays of uniform objects (ssh_file_list, forward lists, etc.) — see https://github.com/toon-format/spec.")
-	requireAuth := flag.Bool("require-auth", envOr("REMOTE_SHELL_MCP_REQUIRE_AUTH", "") == "true", "Require the bearer token even on loopback binds. Non-loopback binds always require it.")
 	flag.Parse()
 
 	format, err := mcptools.ParseFormat(*outFmt)
@@ -73,6 +75,14 @@ func main() {
 	}
 	log := slog.New(handler)
 
+	// Loopback-only daemon: refuse any bind that would expose the MCP
+	// surface (unauthenticated) beyond this machine. Validated on the flag
+	// value BEFORE binding so a typo fails fast with a clear message.
+	if !isLoopbackBind(*addr) {
+		fmt.Fprintf(os.Stderr, "remote-shell-mcpd: -addr %q rejected: only loopback addresses (127.0.0.0/8, ::1, localhost) are allowed\n", *addr)
+		os.Exit(2)
+	}
+
 	lock, err := daemon.AcquireLock(*lockPath)
 	if err != nil {
 		log.Error("acquire lock", "err", err, "path", *lockPath)
@@ -80,27 +90,23 @@ func main() {
 	}
 	defer lock.Release()
 
-	token, err := daemon.GenerateToken()
-	if err != nil {
-		log.Error("generate token", "err", err)
-		os.Exit(1)
-	}
-
 	// Bind the listener up-front so we know the actual port before we publish
 	// the handle. Anything launched after we write daemon.json can trust the
 	// addr in there; nothing can race us, because the handle never points at
-	// a port we haven't already bound.
+	// a port we haven't already bound. On the fixed default port a conflict
+	// fails here with EADDRINUSE — deliberate: we never fall back to a random
+	// port, since registered clients expect the daemon at the default.
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Error("listen", "err", err, "addr", *addr)
+		fmt.Fprintf(os.Stderr, "remote-shell-mcpd: cannot bind %s: %v\n", *addr, err)
 		os.Exit(1)
 	}
 	boundAddr := ln.Addr().String()
 
 	if err := daemon.WriteHandle(*handlePath, daemon.Handle{
-		Addr:  boundAddr,
-		Token: token,
-		PID:   os.Getpid(),
+		Addr: boundAddr,
+		PID:  os.Getpid(),
 	}); err != nil {
 		_ = ln.Close()
 		log.Error("write handle", "err", err, "path", *handlePath)
@@ -134,22 +140,13 @@ func main() {
 		server.WithEndpointPath("/mcp"),
 		server.WithHeartbeatInterval(15*time.Second),
 	)
-	// Two transports: /rpc is one-shot JSON-RPC POST; /mcp is the spec
-	// Streamable HTTP endpoint remote MCP clients register against.
+	// Single transport: /mcp, the spec Streamable HTTP endpoint remote MCP
+	// clients register against. Loopback-only binds make this safe to serve
+	// unauthenticated.
 	mux := http.NewServeMux()
-	mux.Handle("/rpc", daemon.RPCHandler(mcpServer))
 	mux.Handle("/mcp", streamable)
-	// Loopback binds serve local clients and the embedded WebUI — both
-	// already hold machine-local trust, so bearer auth is skipped there.
-	// A non-loopback bind (LAN/tunnel exposure) keeps the token requirement.
-	var root http.Handler = mux
-	if *requireAuth || !isLoopbackBind(boundAddr) {
-		root = daemon.AuthMiddleware(token, mux)
-	} else {
-		log.Info("loopback bind: bearer auth disabled", "addr", boundAddr)
-	}
 	httpSrv := &http.Server{
-		Handler: root,
+		Handler: mux,
 		// Defend against slowloris from a local process holding a connection
 		// open without sending headers. SSE handlers explicitly want long-lived
 		// connections, so we don't set ReadTimeout / WriteTimeout (which would
@@ -160,7 +157,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", boundAddr, "mcp", "/mcp", "rpc", "/rpc",
+		log.Info("listening", "addr", boundAddr, "mcp", "/mcp",
 			"state", store.Path(), "handle", *handlePath, "format", string(format))
 		errCh <- httpSrv.Serve(ln)
 	}()
@@ -198,7 +195,8 @@ func envOr(key, def string) string {
 }
 
 // isLoopbackBind reports whether addr's host part is a loopback IP or a name
-// that resolves there ("localhost"). Port is ignored.
+// that resolves there ("localhost"). Port is ignored. An empty host — e.g.
+// ":8080", Go's all-interfaces shorthand — is NOT loopback and is rejected.
 func isLoopbackBind(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

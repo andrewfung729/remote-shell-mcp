@@ -14,7 +14,7 @@ import (
 // resolveBinary.
 const exeName = "remote-shell-mcpd"
 
-// Ensure makes sure a daemon is running and returns the handle (addr + token)
+// Ensure makes sure a daemon is running and returns the handle (addr + pid)
 // a caller should use to talk to it. If a handle on disk points at a daemon
 // that's actually responsive, we reuse it. Otherwise — handle missing, daemon
 // not listening, or any other half-broken state — we clean up the stale PID
@@ -70,7 +70,7 @@ func tryUseExisting(handlePath string) (Handle, bool) {
 // squatting on the port.
 func killStale(lockPath, handlePath string) error {
 	// Remove leftover handle first so a future fast-path won't pick up stale
-	// addr/token while the new daemon is still coming up.
+	// addr while the new daemon is still coming up.
 	_ = os.Remove(handlePath)
 
 	pid, err := ReadPid(lockPath)

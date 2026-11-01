@@ -27,25 +27,11 @@ type MCPClient struct {
 }
 
 // NewMCPClientForDaemon connects a streamable-HTTP MCP client to a running
-// daemon at http://<addr>/mcp. Loopback binds skip bearer auth, but we pass
-// the handle-file token anyway so this client also works against a
-// -require-auth daemon, same as a remote client would.
+// daemon at http://<addr>/mcp. The daemon is loopback-only and
+// unauthenticated — no headers needed.
 func NewMCPClientForDaemon(t *testing.T, d *Daemon) *MCPClient {
 	t.Helper()
-	tr, err := transport.NewStreamableHTTP(
-		"http://"+d.addr+"/mcp",
-		transport.WithHTTPHeaderFunc(func(ctx context.Context) map[string]string {
-			// Resolve the token per-request instead of capturing it at
-			// connect time: after a daemon restart the handle file holds a
-			// fresh token, and a headerFunc picks it up without rebuilding
-			// the transport.
-			token, err := daemon_ReadHandle(d.handlePath)
-			if err != nil || token == "" {
-				return nil
-			}
-			return map[string]string{"Authorization": "Bearer " + token}
-		}),
-	)
+	tr, err := transport.NewStreamableHTTP("http://" + d.addr + "/mcp")
 	if err != nil {
 		t.Fatalf("new streamable transport: %v", err)
 	}
@@ -55,12 +41,12 @@ func NewMCPClientForDaemon(t *testing.T, d *Daemon) *MCPClient {
 	return mc
 }
 
-// NewMCPClientForAddr is like NewMCPClientForDaemon but takes an addr +
-// handle path directly — for tests that keep the MCP client alive across a
+// NewMCPClientForAddr is like NewMCPClientForDaemon but takes an addr
+// directly — for tests that keep the MCP client alive across a
 // daemon restart, where the client object must outlive any Daemon handle.
-func NewMCPClientForAddr(t *testing.T, addr, handlePath string) *MCPClient {
+func NewMCPClientForAddr(t *testing.T, addr string) *MCPClient {
 	t.Helper()
-	return NewMCPClientForDaemon(t, &Daemon{addr: addr, handlePath: handlePath})
+	return NewMCPClientForDaemon(t, &Daemon{addr: addr})
 }
 
 func (c *MCPClient) initialize() {

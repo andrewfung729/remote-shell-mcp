@@ -38,9 +38,10 @@ adapting to our narrower surface.
 - **Removed**: cmd/remote-shell-mcp, internal/launcher/proxy.go,
   internal/setup/, install.sh, .github/workflows/install-smoke.yml.
 - **Kept**: the daemon auto-spawn helper moved to internal/daemon/spawn.go
-  (`Ensure`/`EnsureAt`); the daemon's `/rpc` POST endpoint is now the
-  e2e transport. `/sse`+`/message` was later replaced by the spec
-  Streamable HTTP transport at `/mcp`.
+  (`Ensure`/`EnsureAt`); the daemon's `/rpc` POST endpoint was later
+  removed — `/mcp` is now the single MCP transport and the e2e transport.
+  `/sse`+`/message` was replaced by the spec Streamable HTTP transport
+  at `/mcp`.
 - **Cherry-pick note**: upstream patches to the stdio launcher, the `setup`
   command, install.sh, or stdio-transport fixes are no-ops here — that code
   does not exist. Daemon-side fixes (sshx, mcptools, state,

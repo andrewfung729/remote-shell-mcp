@@ -3,8 +3,9 @@
 Persistent SSH, SFTP, and port forwarding over MCP, served by a
 single long-lived daemon binary `remote-shell-mcpd`. It holds all
 session/shell/forward state and serves `/mcp` (spec Streamable HTTP)
-plus `/rpc` (one-shot JSON-RPC POST) on a loopback port (no auth on
-loopback; bearer token required on non-loopback binds).
+on a fixed loopback port (default `127.0.0.1:47180`). Binds are
+loopback-only — a non-loopback address is rejected at startup and there
+is no auth token.
 There is no stdio launcher — the direction is a remote-MCP server + Mac app
 (ADR-0002). Package map: README.md "Project layout".
 

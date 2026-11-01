@@ -1210,77 +1210,6 @@ func TestTOONFormat(t *testing.T) {
 	}
 }
 
-// mcpInitBody is a minimal MCP initialize request for /mcp probes.
-const mcpInitBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}`
-
-func TestUnauthorizedRejected(t *testing.T) {
-	daemonBin := BuildDaemon(t)
-	// Loopback binds skip auth by default (local WebUI / MCP clients are
-	// trusted); -require-auth forces the token check so this test can
-	// exercise it.
-	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{RequireAuth: true})
-	defer daemon.Stop()
-
-	// No Authorization header at all → 401.
-	resp, err := http.Get("http://" + daemon.addr + "/mcp")
-	if err != nil {
-		t.Fatalf("GET /mcp without auth: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("expected 401 for unauthenticated, got %d", resp.StatusCode)
-	}
-	if got := resp.Header.Get("WWW-Authenticate"); !strings.Contains(got, "Bearer") {
-		t.Fatalf("expected WWW-Authenticate Bearer challenge, got %q", got)
-	}
-
-	// Wrong token → 401.
-	req, _ := http.NewRequest("GET", "http://"+daemon.addr+"/mcp", nil)
-	req.Header.Set("Authorization", "Bearer notarealtoken")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /mcp with bad token: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("expected 401 for wrong token, got %d", resp.StatusCode)
-	}
-
-	// Right token → the request reaches the MCP layer. A valid initialize
-	// must not come back 401 (the transport's own status is its business).
-	tok, err := daemon_ReadHandle(daemon.handlePath)
-	if err != nil {
-		t.Fatalf("read token: %v", err)
-	}
-	for _, scheme := range []string{"Bearer", "bearer", "BEARER", "BeArEr"} {
-		req, _ = http.NewRequest("POST", "http://"+daemon.addr+"/mcp",
-			strings.NewReader(mcpInitBody))
-		req.Header.Set("Authorization", scheme+" "+tok)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req = req.WithContext(ctx)
-		resp, err = http.DefaultClient.Do(req)
-		cancel()
-		if err != nil {
-			t.Fatalf("POST /mcp with scheme %q: %v", scheme, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == 401 {
-			t.Fatalf("scheme %q got 401 with a valid token", scheme)
-		}
-	}
-
-	// Confirm the handle file mode is 0600.
-	st, err := os.Stat(daemon.handlePath)
-	if err != nil {
-		t.Fatalf("stat handle: %v", err)
-	}
-	if mode := st.Mode().Perm(); mode != 0o600 {
-		t.Fatalf("handle file mode is %o, want 0600", mode)
-	}
-}
-
 func TestDaemonEnsureAutoSpawns(t *testing.T) {
 	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
@@ -1291,10 +1220,11 @@ func TestDaemonEnsureAutoSpawns(t *testing.T) {
 	handlePath := stateDir + "/daemon.json"
 
 	// daemon.EnsureAt spawns the daemon itself when no live handle exists.
-	// The daemon picks a free port at :0 and publishes addr+token to
+	// The daemon binds a free port (explicit -addr) and publishes {addr,pid} to
 	// handlePath; EnsureAt reads it back. Pass state/lock/handle + a JSON
 	// output pin as daemon args so this test's daemon is fully isolated.
 	handle, err := daemon.EnsureAt(handlePath, daemonBin, []string{
+		"-addr", "127.0.0.1:0",
 		"-state", stateDir + "/state.json",
 		"-lock", stateDir + "/daemon.lock",
 		"-handle", handlePath,
@@ -1403,11 +1333,6 @@ func TestDaemonSurvivesClientReconnect(t *testing.T) {
 // transport (Reinitialize) revives the client in place without ever seeing a
 // 404/ErrSessionTerminated. That is exactly how a reconnecting remote MCP
 // client recovers here.
-//
-// The bearer token also rotates across restarts; the client's headerFunc
-// re-reads the handle file per request so it picks up the new token
-// automatically (matters when -require-auth or a non-loopback bind is in
-// play).
 func TestStreamableClientReconnectAcrossDaemonRestart(t *testing.T) {
 	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
@@ -1418,7 +1343,7 @@ func TestStreamableClientReconnectAcrossDaemonRestart(t *testing.T) {
 	defer sshd.Stop()
 
 	// Both daemons share state/lock/handle paths so the restart looks like a
-	// real one: same files, fresh process, fresh token.
+	// real one: same files, fresh process.
 	stateDir := t.TempDir()
 	opts := DaemonOpts{
 		StatePath:  stateDir + "/state.json",
@@ -1428,11 +1353,10 @@ func TestStreamableClientReconnectAcrossDaemonRestart(t *testing.T) {
 
 	daemon1 := StartDaemonWith(t, daemonBin, opts)
 	addr := daemon1.Addr()
-	handlePath := daemon1.HandlePath()
 
-	// Client bound to the addr string + handle path, not the Daemon struct —
-	// it must outlive the daemon it connected to.
-	mc := NewMCPClientForAddr(t, addr, handlePath)
+	// Client bound to the addr string, not the Daemon struct — it must
+	// outlive the daemon it connected to.
+	mc := NewMCPClientForAddr(t, addr)
 	defer mc.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

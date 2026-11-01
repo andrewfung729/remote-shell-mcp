@@ -8,14 +8,12 @@ import (
 )
 
 // Handle is the rendezvous record the daemon writes after it has successfully
-// bound a listener: addr is the actually-bound host:port (kernel-picked when
-// the daemon was started with port 0), token is the per-run bearer token, pid
-// is the daemon's PID so clients can target it for cleanup if the file
-// is around but the process is wedged.
+// bound a listener: addr is the bound host:port, pid is the daemon's PID so
+// clients can target it for cleanup if the file is around but the process is
+// wedged.
 type Handle struct {
-	Addr  string `json:"addr"`
-	Token string `json:"token"`
-	PID   int    `json:"pid"`
+	Addr string `json:"addr"`
+	PID  int    `json:"pid"`
 }
 
 func WriteHandle(path string, h Handle) error {
@@ -46,8 +44,8 @@ func ReadHandle(path string) (Handle, error) {
 	if err := json.Unmarshal(data, &h); err != nil {
 		return h, fmt.Errorf("parse handle %s: %w", path, err)
 	}
-	if h.Addr == "" || h.Token == "" {
-		return h, fmt.Errorf("handle %s missing addr or token", path)
+	if h.Addr == "" {
+		return h, fmt.Errorf("handle %s missing addr", path)
 	}
 	return h, nil
 }
