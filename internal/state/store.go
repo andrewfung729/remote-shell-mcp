@@ -14,24 +14,11 @@ import (
 type Snapshot struct {
 	Version     int                `json:"version"`
 	SSHSessions []SSHSessionRecord `json:"ssh_sessions,omitempty"`
-	Forwards    []ForwardRecord    `json:"forwards,omitempty"`
-	// DockerHosts was dropped when Docker support was removed; the field
-	// stays so old state.json files still parse instead of erroring.
-	DockerHosts []json.RawMessage `json:"docker_hosts,omitempty"`
 }
 
 type SSHSessionRecord struct {
 	ID   string           `json:"id"`
 	Spec sshx.ConnectSpec `json:"spec"`
-}
-
-type ForwardRecord struct {
-	ID          string              `json:"id"`
-	SessionID   string              `json:"session_id"`
-	Kind        sshx.ForwardKind    `json:"kind"`
-	LocalSpec   *sshx.LocalSpec     `json:"local,omitempty"`
-	RemoteSpec  *sshx.RemoteSpec    `json:"remote,omitempty"`
-	DynamicSpec *sshx.DynamicSpec   `json:"dynamic,omitempty"`
 }
 
 type Store struct {
@@ -131,5 +118,3 @@ func ScrubSSH(spec sshx.ConnectSpec) sshx.ConnectSpec {
 	}
 	return out
 }
-
-

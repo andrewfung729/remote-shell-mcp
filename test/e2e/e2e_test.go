@@ -6,9 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +14,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/proxy"
 
 	"github.com/jaenster/remote-shell-mcp/internal/daemon"
 )
@@ -371,182 +366,6 @@ func TestSFTPFullCoverage(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s: got %q want %q", rel, got, want)
 		}
-	}
-}
-
-func TestSSHLocalForwardHTTP(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
-	waitForContainerHTTP(t, sshd)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-
-	var info struct {
-		BindPort int `json:"bind_port"`
-	}
-	if err := mc.CallJSON(ctx, "ssh_forward_local", map[string]any{
-		"session_id":  "s1",
-		"forward_id":  "fL",
-		"bind_port":   0,
-		"remote_host": "127.0.0.1",
-		"remote_port": 8080,
-	}, &info); err != nil {
-		t.Fatalf("forward_local: %v", err)
-	}
-
-	// Real HTTP request through the -L tunnel.
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/marker.txt", info.BindPort))
-	if err != nil {
-		t.Fatalf("http get via forward: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		t.Fatalf("got status %d body=%q", resp.StatusCode, string(body))
-	}
-	if !strings.Contains(string(body), "HELLO-FROM-IN-CONTAINER") {
-		t.Fatalf("forward returned unexpected body: %q", string(body))
-	}
-
-	// Hit a non-existent path to verify error propagation through the tunnel.
-	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/nope.txt", info.BindPort))
-	if err != nil {
-		t.Fatalf("http get 404: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404 for missing file, got %d", resp.StatusCode)
-	}
-
-	if _, err := mc.Call(ctx, "ssh_forward_cancel", map[string]any{"session_id": "s1", "forward_id": "fL"}); err != nil {
-		t.Fatalf("forward_cancel: %v", err)
-	}
-}
-
-func TestSSHRemoteForwardHTTP(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-
-	// Real Go HTTP server on the host that the container will reach via -R.
-	mux := http.NewServeMux()
-	var hits int32
-	var hitsMu sync.Mutex
-	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
-		hitsMu.Lock()
-		hits++
-		hitsMu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hello":"from-host","ua":"` + r.UserAgent() + `"}`))
-	})
-	srv := &http.Server{Handler: mux}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen local: %v", err)
-	}
-	go func() { _ = srv.Serve(ln) }()
-	defer srv.Shutdown(context.Background())
-	hostPort := ln.Addr().(*net.TCPAddr).Port
-
-	// Open a remote forward: container listens on a random port, tunnels back to our Go server.
-	var fwd struct {
-		BindPort int `json:"bind_port"`
-	}
-	if err := mc.CallJSON(ctx, "ssh_forward_remote", map[string]any{
-		"session_id": "s1",
-		"forward_id": "fR",
-		"bind_addr":  "127.0.0.1",
-		"bind_port":  0,
-		"local_host": "127.0.0.1",
-		"local_port": hostPort,
-	}, &fwd); err != nil {
-		t.Fatalf("forward_remote: %v", err)
-	}
-	if fwd.BindPort == 0 {
-		t.Fatalf("expected non-zero remote bind_port")
-	}
-
-	// curl from inside the container — goes through SSH back to our Go server.
-	out, err := exec.Command("docker", "exec", sshd.ID,
-		"curl", "-sS", "--max-time", "5",
-		fmt.Sprintf("http://127.0.0.1:%d/api", fwd.BindPort)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("curl from container: %v\n%s", err, string(out))
-	}
-	if !strings.Contains(string(out), `"hello":"from-host"`) {
-		t.Fatalf("remote forward did not reach host server; got %q", string(out))
-	}
-
-	hitsMu.Lock()
-	gotHits := hits
-	hitsMu.Unlock()
-	if gotHits == 0 {
-		t.Fatalf("host server never saw a hit")
-	}
-
-	if _, err := mc.Call(ctx, "ssh_forward_cancel", map[string]any{"session_id": "s1", "forward_id": "fR"}); err != nil {
-		t.Fatalf("forward_cancel: %v", err)
-	}
-}
-
-func TestSSHDynamicForwardSOCKS5(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
-	waitForContainerHTTP(t, sshd)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "s1", "spec": sshSpec(t, sshd.SSHPort)}); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-
-	var fwd struct {
-		BindPort int `json:"bind_port"`
-	}
-	if err := mc.CallJSON(ctx, "ssh_forward_dynamic", map[string]any{
-		"session_id": "s1",
-		"forward_id": "fD",
-		"bind_port":  0,
-	}, &fwd); err != nil {
-		t.Fatalf("forward_dynamic: %v", err)
-	}
-	if fwd.BindPort == 0 {
-		t.Fatalf("expected non-zero bind_port")
-	}
-
-	// Real SOCKS5 client. Dial through the dynamic proxy to the in-container HTTP server.
-	socksAddr := fmt.Sprintf("127.0.0.1:%d", fwd.BindPort)
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
-	if err != nil {
-		t.Fatalf("socks5 dialer: %v", err)
-	}
-	tr := &http.Transport{
-		Dial: dialer.Dial,
-	}
-	httpc := &http.Client{Transport: tr, Timeout: 10 * time.Second}
-
-	// 127.0.0.1:8080 is reachable on the SSH-server side (it's the container's own loopback).
-	resp, err := httpc.Get("http://127.0.0.1:8080/marker.txt")
-	if err != nil {
-		t.Fatalf("http via SOCKS5: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "HELLO-FROM-IN-CONTAINER") {
-		t.Fatalf("dynamic forward returned %q", string(body))
-	}
-
-	if _, err := mc.Call(ctx, "ssh_forward_cancel", map[string]any{"session_id": "s1", "forward_id": "fD"}); err != nil {
-		t.Fatalf("forward_cancel: %v", err)
 	}
 }
 

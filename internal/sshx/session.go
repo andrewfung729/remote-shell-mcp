@@ -38,9 +38,6 @@ type Session struct {
 	lastError   string
 	connectedAt time.Time
 
-	forwardsMu sync.Mutex
-	forwards   map[string]*Forward
-
 	shellsMu sync.Mutex
 	shells   map[string]*Shell
 
@@ -189,14 +186,8 @@ func (s *Session) close() {
 	if cancel != nil {
 		cancel()
 	}
-	// Drain maps but keep them non-nil so any racing OpenShell/registerForward
+	// Drain the shells map but keep it non-nil so any racing OpenShell
 	// fails the closed check below cleanly rather than panicking on a nil map.
-	s.forwardsMu.Lock()
-	for id, f := range s.forwards {
-		_ = f.Close()
-		delete(s.forwards, id)
-	}
-	s.forwardsMu.Unlock()
 	s.shellsMu.Lock()
 	for id, sh := range s.shells {
 		_ = sh.Close()
@@ -213,12 +204,6 @@ func (s *Session) Info() SessionInfo {
 	s.mu.RLock()
 	state, lastErr, addr, connAt := s.state, s.lastError, s.activeAddr, s.connectedAt
 	s.mu.RUnlock()
-	s.forwardsMu.Lock()
-	fwds := make([]string, 0, len(s.forwards))
-	for id := range s.forwards {
-		fwds = append(fwds, id)
-	}
-	s.forwardsMu.Unlock()
 	s.shellsMu.Lock()
 	shells := make([]string, 0, len(s.shells))
 	for id := range s.shells {
@@ -233,7 +218,6 @@ func (s *Session) Info() SessionInfo {
 		State:         string(state),
 		LastError:     lastErr,
 		ConnectedAt:   connAt,
-		Forwards:      fwds,
 		Shells:        shells,
 		Persistent:    s.Spec.Persistent,
 		AutoReconnect: s.Spec.AutoReconnect,
@@ -248,7 +232,6 @@ type SessionInfo struct {
 	State         string    `json:"state"`
 	LastError     string    `json:"last_error,omitempty"`
 	ConnectedAt   time.Time `json:"connected_at,omitempty"`
-	Forwards      []string  `json:"forwards"`
 	Shells        []string  `json:"shells"`
 	Persistent    bool      `json:"persistent"`
 	AutoReconnect bool      `json:"auto_reconnect"`
@@ -257,8 +240,8 @@ type SessionInfo struct {
 // SessionRow is the compact, primitive-only projection used by ssh_list and
 // status — every field is a scalar so TOON can emit the array in its compact
 // tabular form (`[N]{fields}: row,row,row`) instead of the expanded
-// per-element form. Detailed nested info (addresses list, attached forwards,
-// shells) is available via ssh_info.
+// per-element form. Detailed nested info (addresses list, shells) is
+// available via ssh_info.
 type SessionRow struct {
 	ID            string `json:"id"`
 	User          string `json:"user"`
@@ -267,7 +250,6 @@ type SessionRow struct {
 	LastError     string `json:"last_error"` // empty when none; kept (no omitempty) so tabular form stays uniform
 	Persistent    bool   `json:"persistent"`
 	AutoReconnect bool   `json:"auto_reconnect"`
-	Forwards      int    `json:"forwards"`
 	Shells        int    `json:"shells"`
 }
 
@@ -279,7 +261,7 @@ func (i SessionInfo) Row() SessionRow {
 	return SessionRow{
 		ID: i.ID, User: i.User, Address: addr, State: i.State, LastError: i.LastError,
 		Persistent: i.Persistent, AutoReconnect: i.AutoReconnect,
-		Forwards: len(i.Forwards), Shells: len(i.Shells),
+		Shells: len(i.Shells),
 	}
 }
 

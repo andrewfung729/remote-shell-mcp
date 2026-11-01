@@ -1,8 +1,8 @@
 # remote-shell-mcp
 
-Persistent SSH, SFTP, and port forwarding over MCP, served by a
+Persistent SSH, PTY shells, and SFTP over MCP, served by a
 single long-lived daemon binary `remote-shell-mcpd`. It holds all
-session/shell/forward state and serves `/mcp` (spec Streamable HTTP)
+session/shell state and serves `/mcp` (spec Streamable HTTP)
 on a fixed loopback port (default `127.0.0.1:47180`). Binds are
 loopback-only — a non-loopback address is rejected at startup and there
 is no auth token.

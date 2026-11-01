@@ -39,11 +39,10 @@ func (m *Manager) Connect(id string, spec ConnectSpec) (*Session, error) {
 		return nil, fmt.Errorf("session %q already exists", id)
 	}
 	sess := &Session{
-		ID:       id,
-		Spec:     spec,
-		state:    StateConnecting,
-		forwards: map[string]*Forward{},
-		shells:   map[string]*Shell{},
+		ID:     id,
+		Spec:   spec,
+		state:  StateConnecting,
+		shells: map[string]*Shell{},
 	}
 	m.sessions[id] = sess
 	m.mu.Unlock()
@@ -123,7 +122,6 @@ func (m *Manager) Reconnect(id string) (*Session, error) {
 	if !s.setClient(client, jumps, addr) {
 		return nil, errors.New("session was closed during reconnect")
 	}
-	s.rebindForwards()
 	return s, nil
 }
 
@@ -227,9 +225,9 @@ func (s *Session) attemptReconnect(ctx context.Context) {
 		}
 		client, jumps, addr, err := dialFinal(s.Spec)
 		if err == nil {
-			if s.setClient(client, jumps, addr) {
-				s.rebindForwards()
-			}
+			// Return whether the session was still open when the dial
+			// landed; if it was closed mid-dial setClient drops the client.
+			s.setClient(client, jumps, addr)
 			return
 		}
 		s.markState(StateReconnecting, err)

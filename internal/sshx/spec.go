@@ -6,17 +6,17 @@ import (
 )
 
 type ConnectSpec struct {
-	User             string     `json:"user"`
-	Addresses        []string   `json:"addresses"`
-	JumpHosts        []JumpHost `json:"jump_hosts,omitempty"`
-	Auth             AuthSpec   `json:"auth"`
-	KnownHostsPath   string     `json:"known_hosts_path,omitempty"`
-	Insecure         bool       `json:"insecure,omitempty"`
-	Timeout          Duration   `json:"timeout,omitempty"`
-	Keepalive        Duration   `json:"keepalive,omitempty"`
-	AutoReconnect    bool       `json:"auto_reconnect,omitempty"`
-	Persistent       bool       `json:"persistent,omitempty"`
-	ForwardAgent     bool       `json:"forward_agent,omitempty"`
+	User           string     `json:"user"`
+	Addresses      []string   `json:"addresses"`
+	JumpHosts      []JumpHost `json:"jump_hosts,omitempty"`
+	Auth           AuthSpec   `json:"auth"`
+	KnownHostsPath string     `json:"known_hosts_path,omitempty"`
+	Insecure       bool       `json:"insecure,omitempty"`
+	Timeout        Duration   `json:"timeout,omitempty"`
+	Keepalive      Duration   `json:"keepalive,omitempty"`
+	AutoReconnect  bool       `json:"auto_reconnect,omitempty"`
+	Persistent     bool       `json:"persistent,omitempty"`
+	ForwardAgent   bool       `json:"forward_agent,omitempty"`
 	// DisableSSHConfig skips the ~/.ssh/config resolution pass. By default
 	// the daemon mirrors the `ssh` CLI: any field the caller doesn't set is
 	// filled in from the user's OpenSSH config (Hostname, Port, User,

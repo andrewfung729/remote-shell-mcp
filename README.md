@@ -5,13 +5,13 @@
 [![License](https://img.shields.io/github/license/jaenster/remote-shell-mcp?color=informational)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/jaenster/remote-shell-mcp?logo=go)](go.mod)
 
-**Persistent SSH, SFTP, and port forwarding over the [Model Context Protocol](https://modelcontextprotocol.io). Open the connection once — sessions, tunnels, and PTY shells survive across Claude Code / Claude Desktop / Cursor / Codex CLI restarts.**
+**Persistent SSH, PTY shells, and SFTP over the [Model Context Protocol](https://modelcontextprotocol.io). Open the connection once — sessions and PTY shells survive across Claude Code / Claude Desktop / Cursor / Codex CLI restarts.**
 
 > **Fork of [jaenster/remote-shell-mcp](https://github.com/jaenster/remote-shell-mcp)** — macOS + Linux only (no Windows/FreeBSD). See [FORK.md](FORK.md) for divergences from upstream.
 
-`remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines — `ssh_exec`, persistent PTY shells with state preserved between calls, `-L`/`-R`/`-D` port forwards, and SFTP round-trips.
+`remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines — `ssh_exec`, persistent PTY shells with state preserved between calls, and SFTP round-trips.
 
-It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the SOCKS proxy you set up to reach a database, the keepalive on a flaky link, all keep running.
+It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the keepalive on a flaky link, all keep running.
 
 > **This fork** runs the daemon as a local-only MCP server (see
 > docs/adr/0002). The stdio launcher, per-client `setup` registrar, and curl
@@ -24,7 +24,7 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 ┌──────────────┐   streamable HTTP    ┌────────────────────────┐
 │ MCP client   │ ◀──────────────────▶ │ remote-shell-mcpd      │
 │ (registers   │   127.0.0.1:47180    │ daemon: SSH sessions,  │
-│  a URL)      │      /mcp            │ port forwards          │
+│  a URL)      │      /mcp            │ shells, SFTP           │
 └──────────────┘                      └────────────────────────┘
 ```
 
@@ -34,12 +34,11 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 |-|-|
 | **SSH** | named long-lived sessions, multi-address try-in-order, ProxyJump-style jump hosts, `ssh-agent`/key/password auth, keepalive + auto-reconnect with backoff, persistent across daemon restart, `ssh_clone` |
 | **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls, write/read/resize/close, parallel-safe writes |
-| **Port forwards** | `-L`, `-R`, `-D` (SOCKS5); local forwards auto-rebound after reconnect; 30s per-conn dial timeout |
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
-| **Persistence** | session and forward specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
+| **Persistence** | session specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
 | **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. No auth token — the loopback guard (Host/Origin check) is the boundary. |
 | **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport) — the single MCP transport. |
-| **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`ssh_file_list`, forward lists, etc.). `-format json` reverts to JSON for clients that prefer it. |
+| **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`ssh_file_list`, etc.). `-format json` reverts to JSON for clients that prefer it. |
 
 ## Run the daemon
 
@@ -72,19 +71,18 @@ app uses — but there is no stdio launcher binary to exec from an MCP host.
 
 | Approach | Sessions | Tunnels (`-L`/`-R`/`-D`) | PTY shell state | SFTP | ssh_config / 1Password / agent forwarding |
 |-|-|-|-|-|-|-|
-| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | All three; auto-rebound after reconnect | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
+| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | n/a | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
 | Stdio MCPs that wrap `ssh` per call | Re-dialed for every tool call; nothing survives | Not practical (per-call lifetime) | None (no persistent shell) | Usually missing | Usually missing | Inherits whatever the shell wrapper does |
 | Running `ssh` from a generic Bash MCP | Re-dialed per call | Awkward via `nohup ssh -fN -L …`; you manage the lifetime | None | Via shelling out to `scp`/`rsync` | Manual |
 | `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a | n/a |
 
-Practical consequence: `remote-shell-mcp` lets a model open a session in the morning, run a `tail -f` in a `ssh_shell` for hours, hold a `-L 5432:db:5432` tunnel for the same hours, and have all of it still working after the client restarts twice and your laptop went to sleep.
+Practical consequence: `remote-shell-mcp` lets a model open a session in the morning, run a `tail -f` in a `ssh_shell` for hours, and have all of it still working after the client restarts twice and your laptop went to sleep.
 
 ## Why a daemon?
 
 A stdio MCP server lives and dies with each client connection. That's fine for stateless tools but ruinous for SSH: every Claude Code reload, every `ctrl-C`, every transient shutdown, drops every session, every tunnel, every PTY. With a long-running daemon:
 
 - An `ssh_shell` you `cd /var/log`'d into is still there when the client reconnects.
-- A `-L 5432:db:5432` tunnel into a remote database stays bound for the day.
 - An `auto_reconnect: true` session that lost its TCP transport at 2am is back by 2:05am.
 - A `persistent: true` session written to disk is back after `kill -9 daemon`.
 
@@ -124,7 +122,6 @@ MCP client takes) and exercises:
 
 - Auth: ephemeral key file (suite fixture + per-test keypairs), ssh-agent
 - SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, clone, auto-reconnect after sshd kill, persistence across full daemon restart
-- Forwards: `-L` via real `http.Get`, `-R` with the container `curl`ing back to a Go server in the test process, `-D` SOCKS5 via `golang.org/x/net/proxy`
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
 - Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
 - Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
@@ -135,7 +132,7 @@ MCP client takes) and exercises:
 cmd/
   remote-shell-mcpd/   daemon entry point (the only binary)
 internal/
-  sshx/                SSH manager, dial chain, forwards, PTY shells, SFTP, keepalive
+  sshx/                SSH manager, dial chain, PTY shells, SFTP, keepalive
   mcptools/            MCP tool registrations, debounced state flusher
   state/               on-disk snapshot/restore
   daemon/              pidfile lock, handle publish, loopback listener, auto-spawn (Ensure)

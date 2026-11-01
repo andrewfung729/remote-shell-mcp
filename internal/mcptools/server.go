@@ -146,7 +146,6 @@ func Build(st *State, name, version string) *server.MCPServer {
 	RegisterSSH(srv, st)
 	RegisterSSHShell(srv, st)
 	RegisterSFTP(srv, st)
-	RegisterForward(srv, st)
 	RegisterMeta(srv, st)
 	return srv
 }

@@ -41,7 +41,6 @@ func handleSnapshot(st *State) server.ToolHandlerFunc {
 func handleStatus(st *State) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sshList := st.SSH.List()
-		fwds, _ := st.SSH.ListForwards("")
 		path := ""
 		if st.Store != nil {
 			path = st.Store.Path()
@@ -61,7 +60,6 @@ func handleStatus(st *State) server.ToolHandlerFunc {
 			"goroutines": runtime.NumGoroutine(),
 			"state_path": path,
 			"sessions":   sessionRows,
-			"forwards":   fwds,
 		})
 	}
 }

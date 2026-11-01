@@ -100,7 +100,6 @@ func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 	return methods, closers, nil
 }
 
-
 // HostKeyAlgorithmsFor returns the host-key algorithm names that the user's
 // known_hosts file has entries for, so we can advertise only those. Without
 // this, the server may present (say) an RSA key for a host we only have an
