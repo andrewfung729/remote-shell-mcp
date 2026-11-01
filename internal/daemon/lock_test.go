@@ -51,8 +51,8 @@ func TestLockReleaseAllowsReacquire(t *testing.T) {
 	defer second.Release()
 }
 
-// TestLockWritesPID — ReadPid must return whatever AcquireLock wrote, so the
-// clients can show "daemon running as pid N" diagnostics.
+// TestLockWritesPID — AcquireLock writes the daemon pid as plain text, which
+// `ps` / shell-script cleanup depends on.
 func TestLockWritesPID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.lock")
@@ -63,18 +63,9 @@ func TestLockWritesPID(t *testing.T) {
 	}
 	defer l.Release()
 
-	pid, err := ReadPid(path)
-	if err != nil {
-		t.Fatalf("ReadPid: %v", err)
-	}
-	if pid != os.Getpid() {
-		t.Fatalf("ReadPid=%d, want %d", pid, os.Getpid())
-	}
-	// Also check the file contents directly so we know it's plain text
-	// (we depend on this for `ps` / shell scripts).
 	data, _ := os.ReadFile(path)
-	if _, err := strconv.Atoi(strings.TrimSpace(string(data))); err != nil {
-		t.Fatalf("lock file contents not numeric: %q", data)
+	if got, err := strconv.Atoi(strings.TrimSpace(string(data))); err != nil || got != os.Getpid() {
+		t.Fatalf("lock pid = %q (parse err %v), want %d", string(data), err, os.Getpid())
 	}
 }
 

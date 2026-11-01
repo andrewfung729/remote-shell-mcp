@@ -1,13 +1,10 @@
 package daemon
 
 import (
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 )
 
 type Lock struct {
@@ -47,34 +44,6 @@ func (l *Lock) Release() {
 	_ = releaseLockHandle(l.file)
 	_ = l.file.Close()
 	_ = os.Remove(l.path)
-}
-
-func ReadPid(path string) (int, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(string(data))
-}
-
-func IsListening(addr string, timeout time.Duration) bool {
-	c, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return false
-	}
-	_ = c.Close()
-	return true
-}
-
-func WaitUntilListening(addr string, total time.Duration) error {
-	deadline := time.Now().Add(total)
-	for time.Now().Before(deadline) {
-		if IsListening(addr, 200*time.Millisecond) {
-			return nil
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return errors.New("timed out waiting for daemon to listen on " + addr)
 }
 
 func DefaultPaths() (lockPath, statePath, handlePath string, err error) {

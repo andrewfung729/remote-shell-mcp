@@ -34,18 +34,3 @@ func WriteHandle(path string, h Handle) error {
 	}
 	return nil
 }
-
-func ReadHandle(path string) (Handle, error) {
-	var h Handle
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return h, err
-	}
-	if err := json.Unmarshal(data, &h); err != nil {
-		return h, fmt.Errorf("parse handle %s: %w", path, err)
-	}
-	if h.Addr == "" {
-		return h, fmt.Errorf("handle %s missing addr", path)
-	}
-	return h, nil
-}

@@ -9,13 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/jaenster/remote-shell-mcp/internal/daemon"
 )
 
 func TestMain_BinariesAndImage(t *testing.T) {
@@ -996,67 +993,6 @@ func TestConcurrentReconnects(t *testing.T) {
 	if !strings.Contains(res.Stdout, "survived") {
 		t.Fatalf("post-storm stdout %q", res.Stdout)
 	}
-}
-
-func TestDaemonEnsureAutoSpawns(t *testing.T) {
-	daemonBin := BuildDaemon(t)
-	if err := exec.Command("docker", "version").Run(); err != nil {
-		t.Skipf("docker not available: %v", err)
-	}
-
-	stateDir := t.TempDir()
-	handlePath := stateDir + "/daemon.json"
-
-	// daemon.EnsureAt spawns the daemon itself when no live handle exists.
-	// The daemon binds a free port (explicit -addr) and publishes {addr,pid} to
-	// handlePath; EnsureAt reads it back. Pass state/lock/handle + a JSON
-	// output pin as daemon args so this test's daemon is fully isolated.
-	handle, err := daemon.EnsureAt(handlePath, daemonBin, []string{
-		"-addr", "127.0.0.1:0",
-		"-state", stateDir + "/state.json",
-		"-lock", stateDir + "/daemon.lock",
-		"-handle", handlePath,
-	})
-	if err != nil {
-		t.Fatalf("EnsureAt: %v", err)
-	}
-	t.Cleanup(func() {
-		// The daemon was spawned detached. Read its pid and wait for it to
-		// actually exit before TempDir cleanup removes files it has open.
-		if pid, err := readPidFromLock(stateDir + "/daemon.lock"); err == nil {
-			_ = exec.Command("kill", "-TERM", strconv.Itoa(pid)).Run()
-			deadline := time.Now().Add(3 * time.Second)
-			for time.Now().Before(deadline) {
-				if err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run(); err != nil {
-					break
-				}
-				time.Sleep(80 * time.Millisecond)
-			}
-			_ = exec.Command("kill", "-KILL", strconv.Itoa(pid)).Run()
-		}
-	})
-
-	d := &Daemon{addr: handle.Addr, handlePath: handlePath}
-	mc := NewMCPClientForDaemon(t, d)
-	defer mc.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Proof of life: the auto-spawned daemon answers a real tool call.
-	var rows []sshConnectResp
-	if err := mc.CallJSON(ctx, "ssh_list", nil, &rows); err != nil {
-		t.Fatalf("ssh_list after auto-spawn: %v", err)
-	}
-	t.Logf("auto-spawned daemon answered ssh_list with %d sessions", len(rows))
-}
-
-func readPidFromLock(path string) (int, error) {
-	data, err := exec.Command("cat", path).Output()
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
 }
 
 func TestDaemonSurvivesClientReconnect(t *testing.T) {

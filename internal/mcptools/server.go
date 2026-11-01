@@ -138,12 +138,6 @@ func jsonResult(v any) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-// resultJSON is kept as a package-level fallback for handlers that don't have
-// State plumbed through. New handlers should call (*State).resultJSON.
-func resultJSON(v any) (*mcp.CallToolResult, error) {
-	return jsonResult(v)
-}
-
 func resultErr(err error) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultError(err.Error()), nil
 }

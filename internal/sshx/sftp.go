@@ -43,9 +43,6 @@ func (s *Session) dropSFTP() {
 	}
 }
 
-// closeSFTP is retained for callers that used the previous global API.
-func (s *Session) closeSFTP() { s.dropSFTP() }
-
 type FileEntry struct {
 	Name    string    `json:"name"`
 	Size    int64     `json:"size"`

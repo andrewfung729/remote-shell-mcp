@@ -1,6 +1,6 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache openssh openssh-sftp-server netcat-openbsd busybox-extras curl docker-cli \
+RUN apk add --no-cache openssh openssh-sftp-server netcat-openbsd busybox-extras curl \
  && ssh-keygen -A \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
  && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \

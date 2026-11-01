@@ -33,8 +33,12 @@ const (
 	// explicit addrs).
 	defaultAddr = "127.0.0.1:47180"
 	serverName  = "remote-shell-mcp"
-	serverVer   = "0.1.0"
 )
+
+// version is the daemon's reported MCP server version. The release pipeline
+// injects the real tag via -ldflags "-X main.version=vX.Y.Z"; this fallback
+// is what a plain go build reports.
+var version = "dev"
 
 func main() {
 	addr := flag.String("addr", envOr("REMOTE_SHELL_MCP_ADDR", defaultAddr), "Bind address for the MCP server (host:port). Loopback only — non-loopback binds are rejected. Port 0 means \"pick a free port\" (tests).")
@@ -128,7 +132,7 @@ func main() {
 	// captures empty state and clobbers everything that was just saved).
 	st.Start()
 
-	mcpServer := mcptools.Build(st, serverName, serverVer)
+	mcpServer := mcptools.Build(st, serverName, version)
 	streamable := server.NewStreamableHTTPServer(mcpServer,
 		server.WithEndpointPath("/mcp"),
 		server.WithHeartbeatInterval(15*time.Second),
@@ -141,9 +145,9 @@ func main() {
 	httpSrv := &http.Server{
 		Handler: mux,
 		// Defend against slowloris from a local process holding a connection
-		// open without sending headers. SSE handlers explicitly want long-lived
-		// connections, so we don't set ReadTimeout / WriteTimeout (which would
-		// kill the stream); ReadHeaderTimeout only applies to the request line
+		// open without sending headers. The streamable transport's GET stream
+		// is long-lived, so we don't set ReadTimeout / WriteTimeout (which
+		// would kill it); ReadHeaderTimeout only applies to the request line
 		// + headers.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
