@@ -195,9 +195,8 @@ command = "/bin/other"
 
 // New-adapter coverage: every client we ship in AllClients() must return a
 // usable ConfigPath without erroring, and its Install path must produce a
-// valid file. A wrong ConfigPath on Windows (e.g. forgetting APPDATA) used
-// to silently fall back to garbage paths; this test catches that on the host
-// it actually runs on.
+// valid file. A wrong ConfigPath used to silently fall back to garbage
+// paths; this test catches that on the host it actually runs on.
 func TestEveryClientConfigPathResolves(t *testing.T) {
 	for _, c := range AllClients() {
 		t.Run(c.Name(), func(t *testing.T) {

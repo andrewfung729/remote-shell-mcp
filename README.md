@@ -7,6 +7,8 @@
 
 **Persistent SSH, SFTP, port forwarding, and Docker over the [Model Context Protocol](https://modelcontextprotocol.io). Open the connection once — sessions, tunnels, and PTY shells survive across Claude Code / Claude Desktop / Cursor / Codex CLI restarts.**
 
+> **Fork of [jaenster/remote-shell-mcp](https://github.com/jaenster/remote-shell-mcp)** — macOS + Linux only (no Windows/FreeBSD). See [FORK.md](FORK.md) for divergences from upstream.
+
 `remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines and containers — `ssh_exec`, persistent PTY shells with state preserved between calls, `-L`/`-R`/`-D` port forwards, SFTP round-trips, Docker over `unix://`, `tcp://`, or `ssh://`, container lifecycle, image pulls, and `docker_run`.
 
 It runs as a daemon. Your MCP client talks to a tiny stdio launcher that auto-spawns the daemon on first use and proxies over SSE. The daemon outlives every client restart, every Claude Code reload, every "did the bridge just hang up?" — so the `vim` you opened over a PTY, the SOCKS proxy you set up to reach a database, the keepalive on a flaky link, all keep running.
@@ -80,7 +82,7 @@ remote-shell-mcp setup
 | Client | Config file |
 |-|-|
 | **Claude Code CLI** | `~/.claude.json` `mcpServers` block |
-| **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) / `%APPDATA%\Claude` (Windows) / `~/.config/Claude` (Linux) |
+| **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) / `~/.config/Claude` (Linux) |
 | **Codex CLI** | `~/.codex/config.toml` `[mcp_servers.<name>]` block |
 
 The setup command is idempotent (re-running it is a no-op if the entry already exists with the same command), backs up any existing config file to `.bak` before writing, and supports `--dry-run` to preview the change.

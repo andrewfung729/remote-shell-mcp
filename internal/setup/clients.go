@@ -66,12 +66,6 @@ func (ClaudeDesktop) ConfigPath() (string, error) {
 			return "", err
 		}
 		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"), nil
-	case "windows":
-		dir := os.Getenv("APPDATA")
-		if dir == "" {
-			return "", errors.New("APPDATA not set")
-		}
-		return filepath.Join(dir, "Claude", "claude_desktop_config.json"), nil
 	default:
 		// Linux: Claude Desktop is unofficial here; use the XDG-ish path the
 		// community settled on.
@@ -173,23 +167,14 @@ type Zed struct{}
 func (Zed) Name() string { return "Zed" }
 
 func (Zed) ConfigPath() (string, error) {
-	switch runtime.GOOS {
-	case "windows":
-		dir := os.Getenv("APPDATA")
-		if dir == "" {
-			return "", errors.New("APPDATA not set")
-		}
-		return filepath.Join(dir, "Zed", "settings.json"), nil
-	default:
-		// macOS and Linux both use ~/.config/zed/settings.json. Zed doesn't
-		// use ~/Library/Application Support on Darwin even though most other
-		// macOS apps do.
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, ".config", "zed", "settings.json"), nil
+	// macOS and Linux both use ~/.config/zed/settings.json. Zed doesn't use
+	// ~/Library/Application Support on Darwin even though most other macOS
+	// apps do.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
 	}
+	return filepath.Join(home, ".config", "zed", "settings.json"), nil
 }
 
 func (z Zed) Install(name, command string, args []string, env map[string]string, dryRun bool) (Result, error) {

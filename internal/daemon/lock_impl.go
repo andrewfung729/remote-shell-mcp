@@ -1,5 +1,3 @@
-//go:build !windows
-
 package daemon
 
 import (
@@ -8,7 +6,7 @@ import (
 )
 
 // acquireLockHandle takes a non-blocking, exclusive advisory lock on f via
-// flock(2). Works on Linux, macOS, FreeBSD, NetBSD, OpenBSD, illumos.
+// flock(2). Works on Linux and macOS.
 func acquireLockHandle(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }

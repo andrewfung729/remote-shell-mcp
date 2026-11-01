@@ -15,9 +15,8 @@ type Lock struct {
 	file *os.File
 }
 
-// AcquireLock takes an exclusive, non-blocking lock on path. The platform-
-// specific locking primitive lives in lock_unix.go (flock) / lock_windows.go
-// (LockFileEx) — same intent, same failure mode (already-held → error).
+// AcquireLock takes an exclusive, non-blocking lock on path via flock(2) —
+// the locking primitive lives in lock_impl.go. already-held → error.
 func AcquireLock(path string) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create lock dir: %w", err)

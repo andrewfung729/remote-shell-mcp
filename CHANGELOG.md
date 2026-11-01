@@ -2,6 +2,10 @@
 
 All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Fork: dropped Windows and FreeBSD support.** This fork targets macOS and Linux only. Removed `install.ps1`, the Windows daemon lock (`LockFileEx`) and spawn-detach implementations, all `runtime.GOOS == "windows"` branches, and the Windows/FreeBSD/armv7/riscv64 release and CI matrices. Supported targets: darwin amd64/arm64/universal, linux amd64/arm64. (Resolves upstream jaenster/remote-shell-mcp#1 by removing the affected surface rather than fixing the PowerShell 302 bug — Windows install is no longer offered.)
+
 ## v0.1.8 — 2026-05-14
 
 - **`ssh_upload` / `ssh_download` now handle directories.** Pass a directory as the source and the tree is mirrored recursively at the destination — intermediate dirs created, file permissions preserved best-effort, symlinks skipped. Single-file behavior is unchanged. No base64, no buffering into the MCP message; bytes stream over the SSH channel via SFTP.

@@ -1,6 +1,6 @@
 name: install-smoke
 
-# End-to-end smoke test on all three OSes: build the binaries, put them on
+# End-to-end smoke test on both OSes: build the binaries, put them on
 # PATH, run `remote-shell-mcp setup`, and verify Claude Code's own CLI
 # (`claude mcp list`) sees our server in its config. Then exercise the new
 # /rpc surface to confirm the daemon actually answers.
@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     # Cap the whole job — if `claude mcp list` ever decides to prompt for
     # input on a fresh runner, we'd otherwise burn the default 6h.

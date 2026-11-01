@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -14,17 +13,9 @@ import (
 	"github.com/jaenster/remote-shell-mcp/internal/daemon"
 )
 
-// daemonExeName is the daemon binary's filename including any platform suffix.
-// exec.LookPath honors PATHEXT on Windows, so LookPath("remote-shell-mcpd")
-// finds remote-shell-mcpd.exe transparently — but a manual os.Stat alongside
-// the launcher does NOT, so explicit ".exe" is required for the same-dir
-// probe below.
-var daemonExeName = func() string {
-	if runtime.GOOS == "windows" {
-		return "remote-shell-mcpd.exe"
-	}
-	return "remote-shell-mcpd"
-}()
+// daemonExeName is the daemon binary's filename for the same-directory
+// probe in resolveDaemonBinary.
+const daemonExeName = "remote-shell-mcpd"
 
 // EnsureDaemon makes sure a daemon is running and returns the handle (addr +
 // token) the caller should use to talk to it. If a handle on disk points at a
@@ -98,21 +89,15 @@ func killStaleDaemon(lockPath, handlePath string) error {
 	if waitForExit(proc, 2*time.Second) {
 		return nil
 	}
-	// Stubborn process — escalate. SIGKILL on Unix; Windows os.Process.Kill
-	// translates to TerminateProcess, which has the same effect.
+	// Stubborn process — escalate to SIGKILL. We'd rather leave the user
+	// with a fresh daemon than hang forever on a wedged one.
 	_ = proc.Kill()
 	_ = waitForExit(proc, 2*time.Second)
 	return nil
 }
 
-// waitForExit returns true once Signal(0) reports the process is gone (or the
-// platform doesn't support liveness probing). On Windows os.FindProcess always
-// succeeds and Signal isn't reliable, so we just sleep the grace period.
+// waitForExit returns true once Signal(0) reports the process is gone.
 func waitForExit(proc *os.Process, total time.Duration) bool {
-	if runtime.GOOS == "windows" {
-		time.Sleep(total)
-		return true
-	}
 	deadline := time.Now().Add(total)
 	for time.Now().Before(deadline) {
 		if err := proc.Signal(syscall.Signal(0)); err != nil {
