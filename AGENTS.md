@@ -1,9 +1,10 @@
 # remote-shell-mcp
 
-Persistent SSH, SFTP, port forwarding, and Docker over MCP, served by a
+Persistent SSH, SFTP, and port forwarding over MCP, served by a
 single long-lived daemon binary `remote-shell-mcpd`. It holds all
-session/shell/forward/Docker state and serves `/rpc` (one-shot JSON-RPC
-POST) plus `/sse`+ `/message` on a loopback port behind bearer auth.
+session/shell/forward state and serves `/mcp` (spec Streamable HTTP)
+plus `/rpc` (one-shot JSON-RPC POST) on a loopback port (no auth on
+loopback; bearer token required on non-loopback binds).
 There is no stdio launcher — the direction is a remote-MCP server + Mac app
 (ADR-0002). Package map: README.md "Project layout".
 
@@ -42,9 +43,10 @@ workflow rules).
   `*_impl.go`, not `*_unix.go`.
 - One binary only. Do not reintroduce a stdio launcher or per-client config
   registrar (ADR-0002); new transports belong on the daemon's HTTP server.
-- E2E tests live behind the `e2e` build tag, run real sshd/docker, and talk
-  to the daemon over HTTP `/rpc` — not stdio. Prefer them over mocks when
-  changing `sshx`/`dockerx` behavior.
+- E2E tests live behind the `e2e` build tag, run real sshd (via a
+  Docker container as test fixture), and talk to the daemon over HTTP
+  `/rpc` — not stdio. Prefer them over mocks when changing `sshx`
+  behavior.
 - Module path is still `github.com/jaenster/remote-shell-mcp` (upstream
   name kept so imports don't churn); repo/issue tracker is
   `andrewfung729/remote-shell-mcp`.

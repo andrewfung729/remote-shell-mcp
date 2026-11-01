@@ -8,15 +8,16 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/jaenster/remote-shell-mcp/internal/dockerx"
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 )
 
 type Snapshot struct {
-	Version     int                       `json:"version"`
-	SSHSessions []SSHSessionRecord        `json:"ssh_sessions,omitempty"`
-	Forwards    []ForwardRecord           `json:"forwards,omitempty"`
-	DockerHosts []DockerHostRecord        `json:"docker_hosts,omitempty"`
+	Version     int                `json:"version"`
+	SSHSessions []SSHSessionRecord `json:"ssh_sessions,omitempty"`
+	Forwards    []ForwardRecord    `json:"forwards,omitempty"`
+	// DockerHosts was dropped when Docker support was removed; the field
+	// stays so old state.json files still parse instead of erroring.
+	DockerHosts []json.RawMessage `json:"docker_hosts,omitempty"`
 }
 
 type SSHSessionRecord struct {
@@ -31,11 +32,6 @@ type ForwardRecord struct {
 	LocalSpec   *sshx.LocalSpec     `json:"local,omitempty"`
 	RemoteSpec  *sshx.RemoteSpec    `json:"remote,omitempty"`
 	DynamicSpec *sshx.DynamicSpec   `json:"dynamic,omitempty"`
-}
-
-type DockerHostRecord struct {
-	ID   string              `json:"id"`
-	Spec dockerx.ConnectSpec `json:"spec"`
 }
 
 type Store struct {
@@ -136,9 +132,4 @@ func ScrubSSH(spec sshx.ConnectSpec) sshx.ConnectSpec {
 	return out
 }
 
-func ScrubDocker(spec dockerx.ConnectSpec) dockerx.ConnectSpec {
-	out := spec
-	out.Password = ""
-	out.KeyPassphrase = ""
-	return out
-}
+

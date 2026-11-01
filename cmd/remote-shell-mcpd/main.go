@@ -18,7 +18,6 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaenster/remote-shell-mcp/internal/daemon"
-	"github.com/jaenster/remote-shell-mcp/internal/dockerx"
 	"github.com/jaenster/remote-shell-mcp/internal/mcptools"
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 	"github.com/jaenster/remote-shell-mcp/internal/state"
@@ -40,7 +39,7 @@ func main() {
 	lockPath := flag.String("lock", envOr("REMOTE_SHELL_MCP_LOCK", ""), "Path to daemon lock file.")
 	handlePath := flag.String("handle", envOr("REMOTE_SHELL_MCP_HANDLE", ""), "Path to the handle file. Daemon writes {addr,token,pid} here after binding so clients can find it.")
 	logFmt := flag.String("log", envOr("REMOTE_SHELL_MCP_LOG", "text"), "Log format: text or json.")
-	outFmt := flag.String("format", envOr("REMOTE_SHELL_MCP_FORMAT", "toon"), "Tool-result output format: toon (default) or json. TOON is ~30-50% smaller for arrays of uniform objects (docker_containers, ssh_file_list, etc.) — see https://github.com/toon-format/spec.")
+	outFmt := flag.String("format", envOr("REMOTE_SHELL_MCP_FORMAT", "toon"), "Tool-result output format: toon (default) or json. TOON is ~30-50% smaller for arrays of uniform objects (ssh_file_list, forward lists, etc.) — see https://github.com/toon-format/spec.")
 	requireAuth := flag.Bool("require-auth", envOr("REMOTE_SHELL_MCP_REQUIRE_AUTH", "") == "true", "Require the bearer token even on loopback binds. Non-loopback binds always require it.")
 	flag.Parse()
 
@@ -115,13 +114,12 @@ func main() {
 		os.Exit(1)
 	}
 	sshMgr := sshx.NewManager()
-	dkMgr := dockerx.NewManager()
-	st := &mcptools.State{SSH: sshMgr, Docker: dkMgr, Store: store, Log: log, Format: format}
+	st := &mcptools.State{SSH: sshMgr, Store: store, Log: log, Format: format}
 
 	if snap, err := store.Load(); err != nil {
 		log.Warn("load state", "err", err)
 	} else if snap != nil {
-		state.Restore(snap, sshMgr, dkMgr, log)
+		state.Restore(snap, sshMgr, log)
 	}
 
 	// Start the debounced state flusher before serving traffic so the first
@@ -189,7 +187,6 @@ func main() {
 	// Stop → CloseAll, never the reverse.
 	st.Stop()
 	sshMgr.CloseAll()
-	dkMgr.CloseAll()
 	log.Info("shutdown complete")
 }
 

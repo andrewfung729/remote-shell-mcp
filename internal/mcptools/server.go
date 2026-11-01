@@ -12,14 +12,13 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	toon "github.com/toon-format/toon-go"
 
-	"github.com/jaenster/remote-shell-mcp/internal/dockerx"
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 	"github.com/jaenster/remote-shell-mcp/internal/state"
 )
 
 // OutputFormat controls how tool results are serialized into MCP text content.
 // LLM consumers paying per token may prefer TOON for arrays of uniform
-// objects (docker_containers, ssh_file_list, etc.) where it cuts ~30-50%
+// objects (ssh_file_list, forward lists, etc.) where it cuts ~30-50%
 // vs. JSON.
 type OutputFormat string
 
@@ -41,7 +40,6 @@ func ParseFormat(s string) (OutputFormat, error) {
 
 type State struct {
 	SSH    *sshx.Manager
-	Docker *dockerx.Manager
 	Store  *state.Store
 	Log    *slog.Logger
 	Format OutputFormat // json (default) or toon
@@ -101,7 +99,7 @@ func (s *State) PersistNow() error {
 	if s.Store == nil {
 		return nil
 	}
-	return s.Store.Save(state.Capture(s.SSH, s.Docker))
+	return s.Store.Save(state.Capture(s.SSH))
 }
 
 func (s *State) flushLoop() {
@@ -149,8 +147,6 @@ func Build(st *State, name, version string) *server.MCPServer {
 	RegisterSSHShell(srv, st)
 	RegisterSFTP(srv, st)
 	RegisterForward(srv, st)
-	RegisterDocker(srv, st)
-	RegisterDockerShell(srv, st)
 	RegisterMeta(srv, st)
 	return srv
 }
@@ -234,7 +230,7 @@ func clampReadTimeout(ms int) int {
 
 // execContext derives a timeout context for one-shot exec tools. By design
 // there is no "no timeout" option — long-running work belongs in a persistent
-// shell (ssh_shell_open / docker_shell_open), not in *_exec. Anything <= 0
+// shell (ssh_shell_open), not in *_exec. Anything <= 0
 // (absent, zero, negative) falls back to the caller-supplied default. Values
 // above 1h are capped to defend against pathological input.
 func execContext(parent context.Context, timeoutMs, defaultMs int) (context.Context, context.CancelFunc) {

@@ -43,5 +43,22 @@ adapting to our narrower surface.
   Streamable HTTP transport at `/mcp`.
 - **Cherry-pick note**: upstream patches to the stdio launcher, the `setup`
   command, install.sh, or stdio-transport fixes are no-ops here — that code
-  does not exist. Daemon-side fixes (sshx, dockerx, mcptools, state,
-  daemon's own server) still apply.
+  does not exist. Daemon-side fixes (sshx, mcptools, state,
+  daemon's own server) still apply. Docker support was later removed
+  entirely (see next divergence).
+
+### Docker tools: removed entirely
+
+- **What**: dropped the whole Docker surface — `internal/dockerx` (manager,
+  unix/tcp/ssh dial, container/image ops, in-container shells, copy in/out)
+  and the `docker_*` MCP tools it served.
+- **Why**: the maintainer no longer needs Docker management through MCP;
+  the surface was a large fraction of the tool list and the dependency
+  tree (moby client + image-spec + otel transitives).
+- **Removed**: internal/dockerx/, internal/mcptools/docker{,_shell}.go,
+  Docker e2e tests, `DaemonOpts.MountDockerSocket`, moby deps.
+- **Kept**: `Snapshot.docker_hosts` stays as `json.RawMessage` so old
+  state.json files still parse (a warn-log skips them); the e2e harness
+  still uses the `docker` CLI to run its sshd test container — that's
+  test infrastructure, not a product feature.
+- **Cherry-pick note**: upstream dockerx/docker_* fixes are no-ops here.

@@ -108,24 +108,13 @@ type SSHDContainer struct {
 	t       *testing.T
 }
 
-type SSHDOpts struct {
-	MountDockerSocket bool // bind /var/run/docker.sock into the container
-}
-
 func StartSSHDContainer(t *testing.T) *SSHDContainer {
-	return StartSSHDContainerWith(t, SSHDOpts{})
-}
-
-func StartSSHDContainerWith(t *testing.T, opts SSHDOpts) *SSHDContainer {
 	t.Helper()
 	args := []string{"run", "-d", "--rm",
 		"--label", containerLabel,
 		"-p", "127.0.0.1::22",
+		imageTag,
 	}
-	if opts.MountDockerSocket {
-		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
-	}
-	args = append(args, imageTag)
 	out, err := exec.Command("docker", args...).Output()
 	if err != nil {
 		t.Fatalf("docker run: %v", err)

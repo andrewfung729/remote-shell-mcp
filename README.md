@@ -5,11 +5,11 @@
 [![License](https://img.shields.io/github/license/jaenster/remote-shell-mcp?color=informational)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/jaenster/remote-shell-mcp?logo=go)](go.mod)
 
-**Persistent SSH, SFTP, port forwarding, and Docker over the [Model Context Protocol](https://modelcontextprotocol.io). Open the connection once — sessions, tunnels, and PTY shells survive across Claude Code / Claude Desktop / Cursor / Codex CLI restarts.**
+**Persistent SSH, SFTP, and port forwarding over the [Model Context Protocol](https://modelcontextprotocol.io). Open the connection once — sessions, tunnels, and PTY shells survive across Claude Code / Claude Desktop / Cursor / Codex CLI restarts.**
 
 > **Fork of [jaenster/remote-shell-mcp](https://github.com/jaenster/remote-shell-mcp)** — macOS + Linux only (no Windows/FreeBSD). See [FORK.md](FORK.md) for divergences from upstream.
 
-`remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines and containers — `ssh_exec`, persistent PTY shells with state preserved between calls, `-L`/`-R`/`-D` port forwards, SFTP round-trips, Docker over `unix://`, `tcp://`, or `ssh://`, container lifecycle, image pulls, and `docker_run`.
+`remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines — `ssh_exec`, persistent PTY shells with state preserved between calls, `-L`/`-R`/`-D` port forwards, and SFTP round-trips.
 
 It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the SOCKS proxy you set up to reach a database, the keepalive on a flaky link, all keep running.
 
@@ -24,7 +24,7 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 ┌──────────────┐   remote MCP (HTTP)   ┌────────────────────────┐
 │ MCP client   │ ◀──────────────────▶ │ remote-shell-mcpd      │
 │ (registers   │    Bearer token      │ daemon: SSH sessions,  │
-│  a URL)      │                      │ port forwards, Docker  │
+│  a URL)      │                      │ port forwards          │
 └──────────────┘                      └────────────────────────┘
 ```
 
@@ -36,14 +36,10 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 | **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls, write/read/resize/close, parallel-safe writes |
 | **Port forwards** | `-L`, `-R`, `-D` (SOCKS5); local forwards auto-rebound after reconnect; 30s per-conn dial timeout |
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
-| **Docker** | `unix://`, `tcp://` (TLS), or `ssh://user@host[:port][/path/to/docker.sock]`; multiple hosts per daemon |
-| **Containers** | list / inspect / start / stop / restart / kill / remove / logs, `docker_exec`, `docker_run` with image/cmd/env/ports/volumes/labels and optional auto-pull |
-| **Container shells** | persistent TTY shells inside containers, same model as SSH shells |
-| **Images** | `docker_image_list`, `docker_image_pull` (blocks until done), `docker_image_remove` |
 | **Persistence** | session and forward specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
 | **Auth** | 32-byte random Bearer token, rotated each daemon restart, stored 0600 in the same config dir. Loopback binds skip auth by default (`-require-auth` to force); non-loopback always requires it. |
 | **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport); `/rpc` one-shot JSON-RPC POST. |
-| **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`docker_containers`, `ssh_file_list`, etc.). `-format json` reverts to JSON for clients that prefer it. |
+| **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`ssh_file_list`, forward lists, etc.). `-format json` reverts to JSON for clients that prefer it. |
 
 ## Run the daemon
 
@@ -73,12 +69,12 @@ app uses — but there is no stdio launcher binary to exec from an MCP host.
 
 ## How it compares
 
-| Approach | Sessions | Tunnels (`-L`/`-R`/`-D`) | PTY shell state | SFTP | Docker | ssh_config / 1Password / agent forwarding |
+| Approach | Sessions | Tunnels (`-L`/`-R`/`-D`) | PTY shell state | SFTP | ssh_config / 1Password / agent forwarding |
 |-|-|-|-|-|-|-|
-| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | All three; auto-rebound after reconnect | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | unix / tcp / ssh; full container lifecycle; image pull + `docker_run` | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
+| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | All three; auto-rebound after reconnect | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
 | Stdio MCPs that wrap `ssh` per call | Re-dialed for every tool call; nothing survives | Not practical (per-call lifetime) | None (no persistent shell) | Usually missing | Usually missing | Inherits whatever the shell wrapper does |
-| Running `ssh` from a generic Bash MCP | Re-dialed per call | Awkward via `nohup ssh -fN -L …`; you manage the lifetime | None | Via shelling out to `scp`/`rsync` | Via shelling out to `docker -H ssh://…` | Manual |
-| `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a | If the remote exposes the Docker API | n/a |
+| Running `ssh` from a generic Bash MCP | Re-dialed per call | Awkward via `nohup ssh -fN -L …`; you manage the lifetime | None | Via shelling out to `scp`/`rsync` | Manual |
+| `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a | n/a |
 
 Practical consequence: `remote-shell-mcp` lets a model open a session in the morning, run a `tail -f` in a `ssh_shell` for hours, hold a `-L 5432:db:5432` tunnel for the same hours, and have all of it still working after the client restarts twice and your laptop went to sleep.
 
@@ -123,7 +119,6 @@ The suite (30+ tests, race-clean) exercises:
 - SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, clone, auto-reconnect after sshd kill, persistence across full daemon restart
 - Forwards: `-L` via real `http.Get`, `-R` with the container `curl`ing back to a Go server in the test process, `-D` SOCKS5 via `golang.org/x/net/proxy`
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
-- Docker: unix socket and `ssh://` schemes, list/disconnect, container lifecycle, persistent in-container shell, image pull + run + logs + remove
 - Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
 - Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, 2 MiB MCP response round-trip
 - Auth: 401 path with multiple `Bearer` casings, 0600 token file mode
@@ -135,7 +130,6 @@ cmd/
   remote-shell-mcpd/   daemon entry point (the only binary)
 internal/
   sshx/                SSH manager, dial chain, forwards, PTY shells, SFTP, keepalive
-  dockerx/             Docker manager (unix/tcp/ssh hosts), container/image ops, shells, run
   mcptools/            MCP tool registrations, debounced state flusher
   state/               on-disk snapshot/restore
   daemon/              pidfile lock, auth token, handle publish, /rpc endpoint, auto-spawn (Ensure)

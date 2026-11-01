@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/jaenster/remote-shell-mcp/internal/dockerx"
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 )
 
-func Capture(ssh *sshx.Manager, dk *dockerx.Manager) *Snapshot {
+func Capture(ssh *sshx.Manager) *Snapshot {
 	snap := &Snapshot{Version: 1}
 
 	for _, s := range ssh.Sessions() {
@@ -34,20 +33,11 @@ func Capture(ssh *sshx.Manager, dk *dockerx.Manager) *Snapshot {
 		}
 	}
 
-	for _, h := range dk.Hosts() {
-		if !h.Spec.Persistent {
-			continue
-		}
-		snap.DockerHosts = append(snap.DockerHosts, DockerHostRecord{
-			ID:   h.ID,
-			Spec: ScrubDocker(h.Spec),
-		})
-	}
 	return snap
 }
 
-func Restore(snap *Snapshot, ssh *sshx.Manager, dk *dockerx.Manager, log *slog.Logger) {
-	var sshOK, sshFail, fwdOK, fwdFail, dkOK, dkFail int
+func Restore(snap *Snapshot, ssh *sshx.Manager, log *slog.Logger) {
+	var sshOK, sshFail, fwdOK, fwdFail int
 	for _, rec := range snap.SSHSessions {
 		if _, err := ssh.Connect(rec.ID, rec.Spec); err != nil {
 			sshFail++
@@ -64,13 +54,8 @@ func Restore(snap *Snapshot, ssh *sshx.Manager, dk *dockerx.Manager, log *slog.L
 			fwdOK++
 		}
 	}
-	for _, rec := range snap.DockerHosts {
-		if _, err := dk.Connect(rec.ID, rec.Spec); err != nil {
-			dkFail++
-			log.Warn("restore docker host failed", "id", rec.ID, "err", err)
-		} else {
-			dkOK++
-		}
+	if len(snap.DockerHosts) > 0 {
+		log.Warn("state file has docker_hosts from before Docker support was removed; ignoring", "count", len(snap.DockerHosts))
 	}
 	// One summary line instead of one INFO per restored resource. Failures still
 	// log individually above so the operator can see *which* one didn't come
@@ -79,7 +64,6 @@ func Restore(snap *Snapshot, ssh *sshx.Manager, dk *dockerx.Manager, log *slog.L
 	log.Info("state restored",
 		"ssh_sessions_ok", sshOK, "ssh_sessions_failed", sshFail,
 		"forwards_ok", fwdOK, "forwards_failed", fwdFail,
-		"docker_hosts_ok", dkOK, "docker_hosts_failed", dkFail,
 	)
 }
 
