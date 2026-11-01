@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>remote-shell-mcp</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--dim:#8b949e;--ok:#3fb950;--bad:#f85149;--acc:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 -apple-system,"SF Mono",Menlo,monospace;background:var(--bg);color:var(--fg)}
+  header{display:flex;gap:1.5rem;align-items:baseline;padding:.7rem 1.2rem;background:var(--panel);border-bottom:1px solid var(--border);flex-wrap:wrap}
+  header b{color:var(--acc)}
+  header .stat{color:var(--dim)}
+  header .stat span{color:var(--fg)}
+  main{padding:1rem 1.2rem;display:grid;gap:1.5rem}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1rem}
+  h2{margin:0 0 .8rem;font-size:.95rem;color:var(--acc);text-transform:uppercase;letter-spacing:.05em}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:.45rem .6rem;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase}
+  .state-connected{color:var(--ok)} .state-disconnected,.state-error{color:var(--bad)} .state-reconnecting,.state-connecting{color:var(--acc)}
+  .pill{display:inline-block;padding:.05rem .4rem;border-radius:6px;background:#21262d;font-size:.75rem;color:var(--dim);margin-right:.25rem}
+  button{cursor:pointer;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:.25rem .7rem;font:inherit}
+  button:hover{border-color:var(--acc)}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  .switch{position:relative;width:34px;height:18px;display:inline-block;vertical-align:middle}
+  .switch input{opacity:0;width:0;height:0}
+  .track{position:absolute;inset:0;background:#30363d;border-radius:18px;transition:.15s}
+  .track:before{content:"";position:absolute;width:14px;height:14px;left:2px;top:2px;background:var(--fg);border-radius:50%;transition:.15s}
+  input:checked+.track{background:var(--ok)}
+  input:checked+.track:before{transform:translateX(16px)}
+  .group{margin-bottom:1rem}
+  .group h3{font-size:.8rem;color:var(--dim);margin:.4rem 0}
+  .tool{display:flex;align-items:center;gap:.7rem;padding:.3rem 0;border-bottom:1px solid #21262d}
+  .tool .name{min-width:14em}
+  .tool .desc{color:var(--dim);font-size:.8rem;flex:1}
+  form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.5rem;margin-top:.8rem;align-items:end}
+  label{display:flex;flex-direction:column;font-size:.72rem;color:var(--dim);gap:.15rem}
+  input[type=text],input[type=number],select,textarea{background:#0d1117;border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:.35rem .5rem;font:inherit}
+  .checks{grid-column:1/-1;display:flex;gap:1.2rem}
+  .checks label{flex-direction:row;align-items:center;gap:.35rem}
+  #msg{min-height:1.2em;color:var(--bad);font-size:.82rem}
+  .muted{color:var(--dim);font-size:.8rem}
+</style>
+</head>
+<body>
+<header>
+  <b>remote-shell-mcp</b>
+  <span class="stat">v<span id="st-ver">…</span></span>
+  <span class="stat">up <span id="st-up">…</span></span>
+  <span class="stat"><span id="st-listen">…</span></span>
+  <span class="stat">state: <span id="st-state" class="muted">…</span></span>
+</header>
+<main>
+  <section>
+    <h2>Sessions</h2>
+    <table>
+      <thead><tr><th>id</th><th>state</th><th>user@addr</th><th>flags</th><th>shells</th><th>last error</th><th></th></tr></thead>
+      <tbody id="sess-body"><tr><td colspan="7" class="muted">loading…</td></tr></tbody>
+    </table>
+    <div id="msg"></div>
+    <form id="add-form">
+      <label>id<input type="text" id="f-id" required placeholder="prod"></label>
+      <label>user<input type="text" id="f-user" required placeholder="deploy"></label>
+      <label>addresses (comma)<input type="text" id="f-addrs" required placeholder="10.0.0.5, host:22"></label>
+      <label>key_path<input type="text" id="f-key" placeholder="~/.ssh/id_ed25519"></label>
+      <label>jump hosts (user@host,…)<input type="text" id="f-jumps" placeholder="bastion"></label>
+      <div class="checks">
+        <label><input type="checkbox" id="f-agent"> use_agent</label>
+        <label><input type="checkbox" id="f-persist"> persistent</label>
+        <label><input type="checkbox" id="f-reconn"> auto_reconnect</label>
+        <label><input type="checkbox" id="f-fwd"> forward_agent</label>
+        <label><input type="checkbox" id="f-insec"> insecure</label>
+      </div>
+      <button type="submit">connect</button>
+    </form>
+  </section>
+  <section>
+    <h2>MCP Tools</h2>
+    <div id="tools"><span class="muted">loading…</span></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const api = async (m,p,b) => {
+  const r = await fetch('/api'+p,{method:m,headers:b?{'Content-Type':'application/json'}:{},body:b?JSON.stringify(b):undefined});
+  const t = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(t.error||('HTTP '+r.status));
+  return t;
+};
+async function loadStatus(){
+  try{const s=await api('GET','/status');
+    $('#st-ver').textContent=s.version;$('#st-up').textContent=s.uptime;
+    $('#st-listen').textContent=s.listen;$('#st-state').textContent=s.state_path;
+  }catch(e){}
+}
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+async function loadSessions(){
+  try{const rows=await api('GET','/sessions');
+    const tb=$('#sess-body');tb.innerHTML='';
+    if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="muted">no live sessions</td></tr>';return}
+    for(const s of rows){
+      const flags=['persistent','auto_reconnect','forward_agent'].filter(f=>s[f]).map(f=>'<span class="pill">'+f+'</span>').join('');
+      const shells=(s.shells||[]).map(sh=>'<span class="pill">'+esc(sh.id)+' '+esc(sh.age)+'</span>').join('');
+      const tr=document.createElement('tr');
+      tr.innerHTML='<td><b>'+esc(s.id)+'</b></td><td class="state-'+esc(s.state)+'">'+esc(s.state)+'</td>'+
+        '<td>'+esc(s.user)+'@'+esc((s.active_address||(s.addresses||[])[0]||''))+'</td><td>'+flags+'</td><td>'+shells+'</td>'+
+        '<td class="muted">'+esc(s.last_error||'')+'</td>'+
+        '<td><button data-a="reconnect">reconnect</button> <button class="danger" data-a="disconnect">disconnect</button></td>';
+      tr.querySelectorAll('button').forEach(b=>b.onclick=()=>act(s.id,b.dataset.a));
+      tb.appendChild(tr);
+    }
+  }catch(e){$('#msg').textContent=e.message}
+}
+async function act(id,a){
+  $('#msg').textContent='';
+  try{await api('POST','/sessions/'+a,{id});loadSessions()}catch(e){$('#msg').textContent=e.message}
+}
+$('#add-form').onsubmit=async ev=>{
+  ev.preventDefault();$('#msg').textContent='';
+  const spec={user:$('#f-user').value,
+    addresses:$('#f-addrs').value.split(',').map(s=>s.trim()).filter(Boolean),
+    auth:{},
+    persistent:$('#f-persist').checked,auto_reconnect:$('#f-reconn').checked,
+    forward_agent:$('#f-fwd').checked,insecure:$('#f-insec').checked};
+  if($('#f-key').value)spec.auth.key_path=$('#f-key').value;
+  if($('#f-agent').checked)spec.auth.use_agent=true;
+  const jh=$('#f-jumps').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(jh.length)spec.jump_hosts=jh.map(h=>{const[u,a]=h.split('@');return{user:u||'',addresses:[a||h],auth:spec.auth,insecure:spec.insecure}});
+  try{await api('POST','/sessions/connect',{id:$('#f-id').value,spec});ev.target.reset();loadSessions()}
+  catch(e){$('#msg').textContent=e.message}
+};
+function group(name){const m=name.match(/^ssh_(connect|disconnect|list|reconnect|exec)/)?'session':name.startsWith('ssh_shell')?'shell':name.startsWith('ssh_file')||name.startsWith('ssh_upload')||name.startsWith('ssh_download')?'file':'other';return m}
+async function loadTools(){
+  try{const tools=await api('GET','/tools');
+    tools.sort((a,b)=>a.name.localeCompare(b.name));
+    const groups={};for(const t of tools){(groups[group(t.name)] ||= []).push(t)}
+    const el=$('#tools');el.innerHTML='';
+    for(const g of Object.keys(groups).sort()){
+      const div=document.createElement('div');div.className='group';
+      div.innerHTML='<h3>'+esc(g)+'</h3>';
+      for(const t of groups[g]){
+        const row=document.createElement('div');row.className='tool';
+        row.innerHTML='<label class="switch"><input type="checkbox" '+(t.enabled?'checked':'')+'><span class="track"></span></label>'+
+          '<span class="name">'+esc(t.name)+'</span><span class="desc">'+esc(t.description||'')+'</span>';
+        row.querySelector('input').onchange=async e=>{
+          try{await api('POST','/tools/set',{name:t.name,enabled:e.target.checked});loadTools()}
+          catch(err){$('#msg').textContent=err.message;e.target.checked=!e.target.checked}
+        };
+        div.appendChild(row);
+      }
+      el.appendChild(div);
+    }
+  }catch(e){$('#tools').innerHTML='<span class="muted">'+esc(e.message)+'</span>'}
+}
+loadStatus();loadSessions();loadTools();
+setInterval(loadStatus,3000);setInterval(loadSessions,2500);
+</script>
+</body>
+</html>

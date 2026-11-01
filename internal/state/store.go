@@ -14,6 +14,10 @@ import (
 type Snapshot struct {
 	Version     int                `json:"version"`
 	SSHSessions []SSHSessionRecord `json:"ssh_sessions,omitempty"`
+	// DisabledTools is the WebUI's per-tool on/off state, kept in the same
+	// state file (no separate config). Restored on startup so a disabled
+	// tool stays off across daemon restarts.
+	DisabledTools []string `json:"disabled_tools,omitempty"`
 }
 
 type SSHSessionRecord struct {

@@ -50,6 +50,11 @@ workflow rules).
   MCP client takes. The sshd image authenticates fixtures via an ephemeral
   ed25519 suite key (no password auth). Prefer e2e tests over mocks when
   changing `sshx` behavior.
+- The WebUI lives in `internal/webui/`: `/api/*` handlers plus an
+  embedded single-page UI (`webui/static/`). Plain HTML + vanilla JS, no
+  build step — `go build` is the only build. Its handlers call the SSH
+  manager / state store / tool toggler directly, never MCP tools, so no
+  tool toggle can lock the page out.
 - Module path is still `github.com/jaenster/remote-shell-mcp` (upstream
   name kept so imports don't churn); repo/issue tracker is
   `andrewfung729/remote-shell-mcp`.

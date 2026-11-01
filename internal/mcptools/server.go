@@ -19,6 +19,11 @@ type State struct {
 	Store *state.Store
 	Log   *slog.Logger
 
+	// DisabledTools, when set, supplies the names of the currently-disabled
+	// MCP tools so a state flush persists them. main() wires this to the
+	// ToolToggler after the server is built.
+	DisabledTools func() []string
+
 	flushStartOnce sync.Once
 	flushReqCh     chan struct{} // capacity 1; coalesced "please flush" signal
 	flushStopCh    chan struct{}
@@ -74,7 +79,11 @@ func (s *State) PersistNow() error {
 	if s.Store == nil {
 		return nil
 	}
-	return s.Store.Save(state.Capture(s.SSH))
+	var disabled []string
+	if s.DisabledTools != nil {
+		disabled = s.DisabledTools()
+	}
+	return s.Store.Save(state.Capture(s.SSH, disabled))
 }
 
 func (s *State) flushLoop() {

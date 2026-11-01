@@ -21,6 +21,7 @@ import (
 	"github.com/jaenster/remote-shell-mcp/internal/mcptools"
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 	"github.com/jaenster/remote-shell-mcp/internal/state"
+	"github.com/jaenster/remote-shell-mcp/internal/webui"
 )
 
 const (
@@ -119,10 +120,12 @@ func main() {
 	sshMgr := sshx.NewManager()
 	st := &mcptools.State{SSH: sshMgr, Store: store, Log: log}
 
-	if snap, err := store.Load(); err != nil {
+	var snap *state.Snapshot
+	if s, err := store.Load(); err != nil {
 		log.Warn("load state", "err", err)
-	} else if snap != nil {
-		state.Restore(snap, sshMgr, log)
+	} else {
+		snap = s
+		state.Restore(s, sshMgr, log)
 	}
 
 	// Start the debounced state flusher before serving traffic so the first
@@ -133,6 +136,15 @@ func main() {
 	st.Start()
 
 	mcpServer := mcptools.Build(st, serverName, version)
+
+	// Tool toggling: the WebUI flips MCP tools on/off without a restart.
+	// Apply the persisted disabled set, then feed future flushes the live set.
+	toggler := mcptools.NewToolToggler(mcpServer, st)
+	if snap != nil {
+		toggler.ApplyDisabled(snap.DisabledTools)
+	}
+	st.DisabledTools = toggler.DisabledNames
+
 	streamable := server.NewStreamableHTTPServer(mcpServer,
 		server.WithEndpointPath("/mcp"),
 		server.WithHeartbeatInterval(15*time.Second),
@@ -142,6 +154,15 @@ func main() {
 	// unauthenticated.
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", streamable)
+	// The WebUI serves /api/* and the embedded page at /. Its handlers call
+	// the manager/store/toggler directly — not MCP tools — so no tool toggle
+	// can lock the page out.
+	ui := webui.New(&webui.Deps{
+		SSH: sshMgr, Store: store, Toggler: toggler,
+		Version: version, BoundAddr: boundAddr, Log: log,
+	})
+	mux.Handle("/api/", ui)
+	mux.Handle("/", ui)
 	// Wrap the whole mux so a hostile web page can't drive the daemon:
 	// Host must be loopback on the bound port (DNS-rebinding), any Origin
 	// must be same-origin, and /api POSTs must carry a JSON content type.

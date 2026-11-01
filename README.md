@@ -111,6 +111,27 @@ cross-site `fetch()`), and `POST`s under `/api` must carry
 `application/json` (blocks preflight-free simple requests). Native MCP
 clients and `curl` send no `Origin` and pass through.
 
+## WebUI
+
+Point a browser at the daemon's address (default `http://127.0.0.1:47180`)
+to open the configuration/monitoring page. It shows:
+
+- **Status** — uptime, version, listen address, state-file path.
+- **Sessions** — every live session with state, user@addr, flags
+  (persistent / auto_reconnect / forward_agent), last error, and a read-only
+  list of its open shells (id + age). Connect a new session, or disconnect /
+  reconnect an existing one. Editing a session = disconnect + reconnect with
+  a new spec.
+- **MCP tools** — every tool with an on/off switch, grouped by name prefix.
+  Disabling a tool removes it from the MCP `tools/list` and makes calls
+  fail; re-enabling restores it instantly (clients get a
+  `tools/list_changed` notification). The choice persists across restarts.
+
+The page is plain HTML + vanilla JS embedded in the binary — no Node, no
+bundler, no build step; `go build` is the only build. It deliberately has
+**no command execution, file browsing, or terminal** — those stay MCP-only
+capabilities for the agent.
+
 ## End-to-end tests
 
 Requires Docker. First run builds a small `alpine + openssh + busybox-httpd` test image (~20 MB).
@@ -124,10 +145,11 @@ Streamable HTTP `/mcp` endpoint using the mcp-go client (same path a real
 MCP client takes) and exercises:
 
 - Auth: ephemeral key file (suite fixture + per-test keypairs), ssh-agent
-- SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, clone, auto-reconnect after sshd kill, persistence across full daemon restart
+- SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, auto-reconnect after sshd kill, persistence across full daemon restart
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
 - Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
-- Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
+- Daemon: daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
+- WebUI/guard: Host/Origin rejection (hostile Origin + spoofed Host), JSON content-type on /api POSTs, bound-port Host check, /api status/sessions, static page, tool disable/enable removing and restoring the tool from MCP tools/list, disabled state persisting across restart
 
 ## Project layout
 
@@ -136,7 +158,8 @@ cmd/
   remote-shell-mcpd/   daemon entry point (the only binary)
 internal/
   sshx/                SSH manager, dial chain, PTY shells, SFTP, keepalive
-  mcptools/            MCP tool registrations, debounced state flusher
+  mcptools/            MCP tool registrations, debounced state flusher, tool toggler
+  webui/               /api handlers + embedded single-page UI (no build step)
   state/               on-disk session persistence/restore
   daemon/              pidfile lock, handle publish, loopback listener, Host/Origin guard
 test/e2e/              end-to-end tests + sshd container Dockerfile
