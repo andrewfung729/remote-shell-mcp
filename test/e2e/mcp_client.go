@@ -3,179 +3,109 @@
 package e2e
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"strings"
-	"sync"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// MCPClient is a test MCP client that talks to the daemon's /rpc endpoint
+// over plain HTTP. There is no stdio launcher anymore — the daemon is the
+// only binary and serves a one-shot JSON-RPC POST endpoint, so a test client
+// is just an HTTP POST with a bearer token.
 type MCPClient struct {
-	t      *testing.T
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
+	t     *testing.T
+	url   string
+	token string
+	hc    *http.Client
 
 	nextID atomic.Int64
-
-	mu       sync.Mutex
-	pending  map[int64]chan rawResponse
-	closed   atomic.Bool
-	readDone chan struct{}
+	closed atomic.Bool
 }
 
-type rawResponse struct {
-	raw json.RawMessage
-	err error
-}
-
-func NewMCPClient(t *testing.T, launcherBin, addr string) *MCPClient {
+// NewMCPClientForDaemon connects a test client to a running daemon. The
+// bearer token is read from the daemon's handle file.
+func NewMCPClientForDaemon(t *testing.T, d *Daemon) *MCPClient {
 	t.Helper()
-	return NewMCPClientForDaemon(t, launcherBin, &Daemon{addr: addr})
-}
-
-func NewMCPClientForDaemon(t *testing.T, launcherBin string, d *Daemon) *MCPClient {
-	t.Helper()
-	args := []string{"-no-spawn"}
-	if d.handlePath != "" {
-		args = append(args, "-handle", d.handlePath)
-	}
-	cmd := exec.Command(launcherBin, args...)
-	stdin, err := cmd.StdinPipe()
+	token, err := daemon_ReadHandle(d.handlePath)
 	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
+		t.Fatalf("read daemon handle for token: %v", err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start launcher: %v", err)
-	}
-	return attachMCP(t, cmd, stdin, stdout)
-}
-
-func AttachMCPClient(t *testing.T, cmd *exec.Cmd, stdin io.WriteCloser, stdout io.Reader) *MCPClient {
-	t.Helper()
-	return attachMCP(t, cmd, stdin, stdout)
-}
-
-func attachMCP(t *testing.T, cmd *exec.Cmd, stdin io.WriteCloser, stdout io.Reader) *MCPClient {
 	c := &MCPClient{
-		t:        t,
-		cmd:      cmd,
-		stdin:    stdin,
-		stdout:   bufio.NewReaderSize(stdout, 1<<20),
-		pending:  map[int64]chan rawResponse{},
-		readDone: make(chan struct{}),
+		t:     t,
+		url:   "http://" + d.addr + "/rpc",
+		token: token,
+		hc:    &http.Client{Timeout: 0},
 	}
-	go c.readLoop()
 	c.initialize()
 	return c
 }
 
-func (c *MCPClient) readLoop() {
-	defer close(c.readDone)
-	for {
-		line, err := c.stdout.ReadString('\n')
-		if line != "" {
-			line = strings.TrimRight(line, "\r\n")
-			c.dispatch(line)
-		}
-		if err != nil {
-			c.mu.Lock()
-			for _, ch := range c.pending {
-				ch <- rawResponse{err: err}
-			}
-			c.pending = nil
-			c.mu.Unlock()
-			return
-		}
-	}
-}
-
-func (c *MCPClient) dispatch(line string) {
-	var env struct {
-		ID     *int64           `json:"id"`
-		Method *string          `json:"method"`
-		Result json.RawMessage  `json:"result"`
-		Error  *json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(line), &env); err != nil {
-		return
-	}
-	if env.ID == nil {
-		return
-	}
-	c.mu.Lock()
-	ch, ok := c.pending[*env.ID]
-	if ok {
-		delete(c.pending, *env.ID)
-	}
-	c.mu.Unlock()
-	if !ok {
-		return
-	}
-	if env.Error != nil {
-		ch <- rawResponse{err: fmt.Errorf("rpc error: %s", string(*env.Error))}
-		return
-	}
-	ch <- rawResponse{raw: env.Result}
-}
-
-func (c *MCPClient) send(payload any) error {
+// do posts a single JSON-RPC message and returns the raw result. Notifications
+// (no id) return nil — /rpc answers them with 204 No Content.
+func (c *MCPClient) do(ctx context.Context, payload any) (json.RawMessage, error) {
 	if c.closed.Load() {
-		return fmt.Errorf("client closed")
+		return nil, fmt.Errorf("client closed")
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.stdin.Write(append(data, '\n')); err != nil {
-		return err
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rpc http %d: %s", resp.StatusCode, string(body))
+	}
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("decode rpc response: %w (body: %s)", err, string(body))
+	}
+	if env.Error != nil {
+		return nil, fmt.Errorf("rpc error: %s", string(*env.Error))
+	}
+	return env.Result, nil
 }
 
 func (c *MCPClient) initialize() {
 	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	id := c.nextID.Add(1)
-	ch := c.expect(id)
-	_ = c.send(map[string]any{
+	if _, err := c.do(ctx, map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": "initialize",
 		"params": map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{},
 			"clientInfo":      map[string]any{"name": "e2e", "version": "1"},
 		},
-	})
-	select {
-	case resp := <-ch:
-		if resp.err != nil {
-			c.t.Fatalf("initialize: %v", resp.err)
-		}
-	case <-time.After(10 * time.Second):
-		c.t.Fatalf("initialize: timeout")
+	}); err != nil {
+		c.t.Fatalf("initialize: %v", err)
 	}
-	_ = c.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
-}
-
-func (c *MCPClient) expect(id int64) chan rawResponse {
-	ch := make(chan rawResponse, 1)
-	c.mu.Lock()
-	c.pending[id] = ch
-	c.mu.Unlock()
-	return ch
+	_, _ = c.do(ctx, map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
 }
 
 func (c *MCPClient) Call(ctx context.Context, tool string, args map[string]any) (json.RawMessage, error) {
@@ -184,22 +114,10 @@ func (c *MCPClient) Call(ctx context.Context, tool string, args map[string]any) 
 		args = map[string]any{}
 	}
 	id := c.nextID.Add(1)
-	ch := c.expect(id)
-	if err := c.send(map[string]any{
+	return c.do(ctx, map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": "tools/call",
 		"params": map[string]any{"name": tool, "arguments": args},
-	}); err != nil {
-		return nil, err
-	}
-	select {
-	case resp := <-ch:
-		if resp.err != nil {
-			return nil, resp.err
-		}
-		return resp.raw, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	})
 }
 
 func (c *MCPClient) CallText(ctx context.Context, tool string, args map[string]any) (string, error) {
@@ -238,13 +156,5 @@ func (c *MCPClient) CallJSON(ctx context.Context, tool string, args map[string]a
 }
 
 func (c *MCPClient) Close() {
-	if !c.closed.CompareAndSwap(false, true) {
-		return
-	}
-	_ = c.stdin.Close()
-	select {
-	case <-c.readDone:
-	case <-time.After(2 * time.Second):
-	}
-	_ = c.cmd.Wait()
+	c.closed.Store(true)
 }

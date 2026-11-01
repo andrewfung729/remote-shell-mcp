@@ -10,7 +10,7 @@ import (
 // Handle is the rendezvous record the daemon writes after it has successfully
 // bound a listener: addr is the actually-bound host:port (kernel-picked when
 // the daemon was started with port 0), token is the per-run bearer token, pid
-// is the daemon's PID so the launcher can target it for cleanup if the file
+// is the daemon's PID so clients can target it for cleanup if the file
 // is around but the process is wedged.
 type Handle struct {
 	Addr  string `json:"addr"`

@@ -32,7 +32,7 @@ func TestWriteReadHandleRoundTrip(t *testing.T) {
 func TestReadHandleRejectsMissingFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.json")
-	// addr-only — the launcher would have nothing to authenticate with.
+	// addr-only — a client would have nothing to authenticate with.
 	if err := os.WriteFile(path, []byte(`{"addr":"127.0.0.1:1"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

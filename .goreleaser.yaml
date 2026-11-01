@@ -18,31 +18,16 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
 
-  - id: launcher
-    main: ./cmd/remote-shell-mcp
-    binary: remote-shell-mcp
-    env:
-      - CGO_ENABLED=0
-    goos: [darwin, linux]
-    goarch: [amd64, arm64]
-    ldflags:
-      - -s -w
-      - -X main.version={{.Version}}
-
 # Combined amd64+arm64 Mach-O so a single tarball runs on any modern Mac.
 universal_binaries:
   - id: daemon-universal
     ids: [daemon]
     name_template: remote-shell-mcpd
     replace: false
-  - id: launcher-universal
-    ids: [launcher]
-    name_template: remote-shell-mcp
-    replace: false
 
 archives:
   - id: default
-    ids: [daemon, launcher]
+    ids: [daemon]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats: [tar.gz]
@@ -51,7 +36,7 @@ archives:
       - README.md
 
   - id: universal
-    ids: [daemon-universal, launcher-universal]
+    ids: [daemon-universal]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_darwin_universal
     formats: [tar.gz]
@@ -77,14 +62,11 @@ changelog:
 
 release:
   github:
-    owner: jaenster
+    owner: andrewfung729
     name: remote-shell-mcp
   header: |
     ## remote-shell-mcp {{ .Tag }}
 
-    Install with:
-    ```
-    curl -fsSL https://raw.githubusercontent.com/jaenster/remote-shell-mcp/main/install.sh | sh
-    ```
-
-    Or download the archive for your platform below.
+    Single daemon binary (remote-shell-mcpd). Download the archive for your
+    platform, run it, then point your MCP client at the published /rpc or
+    /sse endpoint with the bearer token from daemon.json.

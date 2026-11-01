@@ -19,10 +19,12 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
+
+	"github.com/jaenster/remote-shell-mcp/internal/daemon"
 )
 
 func TestMain_BinariesAndImage(t *testing.T) {
-	_, _ = BuildBinaries(t)
+	_ = BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -55,14 +57,14 @@ func sshSpec(port int) map[string]any {
 
 func setupSession(t *testing.T) (*MCPClient, *SSHDContainer, *Daemon, func()) {
 	t.Helper()
-	daemonBin, launcherBin := BuildBinaries(t)
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
 	EnsureDockerImage(t)
 	sshd := StartSSHDContainer(t)
 	daemon := StartDaemon(t, daemonBin)
-	mc := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc := NewMCPClientForDaemon(t, daemon)
 	teardown := func() {
 		mc.Close()
 		daemon.Stop()
@@ -858,7 +860,7 @@ func TestSSHAgentAuth(t *testing.T) {
 	if _, err := exec.LookPath("ssh-add"); err != nil {
 		t.Skip("ssh-add not available")
 	}
-	daemonBin, launcherBin := BuildBinaries(t)
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -874,7 +876,7 @@ func TestSSHAgentAuth(t *testing.T) {
 	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"SSH_AUTH_SOCK=" + authSock}})
 	defer daemon.Stop()
 
-	mc := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc := NewMCPClientForDaemon(t, daemon)
 	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -972,7 +974,7 @@ func TestSSHAutoReconnect(t *testing.T) {
 }
 
 func TestStateAcrossDaemonRestart(t *testing.T) {
-	daemonBin, launcherBin := BuildBinaries(t)
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -989,7 +991,7 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 
 	// Phase 1 — connect a persistent session with key auth.
 	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
-	mc := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc := NewMCPClientForDaemon(t, daemon)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -1024,7 +1026,7 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 	// Phase 2 — fresh daemon on a new port, same state file.
 	daemon2 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
 	defer daemon2.Stop()
-	mc2 := NewMCPClientForDaemon(t, launcherBin, daemon2)
+	mc2 := NewMCPClientForDaemon(t, daemon2)
 	defer mc2.Close()
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1076,7 +1078,7 @@ func TestDockerOverSSH(t *testing.T) {
 	if detectDockerHost() == "" {
 		t.Skip("no docker socket on host to tunnel to")
 	}
-	daemonBin, launcherBin := BuildBinaries(t)
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -1086,7 +1088,7 @@ func TestDockerOverSSH(t *testing.T) {
 	daemon := StartDaemon(t, daemonBin)
 	defer daemon.Stop()
 
-	mc := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc := NewMCPClientForDaemon(t, daemon)
 	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
@@ -1429,18 +1431,13 @@ func TestManyParallelSessions(t *testing.T) {
 	}
 }
 
-// NOTE: TestTrulyParallelClients (multiple launcher subprocesses connecting to
-// the same daemon) was attempted but exposed an interaction with mcp-go's
-// SSE server under -race that I haven't been able to isolate yet — token
-// reads after the first launcher's SSE stream return "stream ended". The
-// daemon-side concurrency we actually care about IS tested by
-// TestManyParallelSessions (10 concurrent ssh_connect on one client; the
-// daemon side runs N handler goroutines via the SSE server's request
-// dispatch), TestConcurrentShellWrites, and TestConcurrentReconnects.
-// Multi-launcher coverage is a known gap.
+// NOTE: parallel HTTP clients hitting the same daemon is covered by
+// TestManyParallelSessions (10 concurrent ssh_connect on one client — the
+// daemon side runs N handler goroutines), TestConcurrentShellWrites, and
+// TestConcurrentReconnects.
 
 // TestLargeMCPResponse drives a tool that returns a multi-megabyte payload to
-// confirm the launcher proxy handles big SSE messages (no scanner cap).
+// confirm /rpc handles big JSON-RPC bodies without a scanner/buffer cap.
 func TestLargeMCPResponse(t *testing.T) {
 	mc, sshd, _, teardown := setupSession(t)
 	defer teardown()
@@ -1562,7 +1559,9 @@ func TestConcurrentShellWrites(t *testing.T) {
 	var acc strings.Builder
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
-		var out struct{ Data string `json:"data"` }
+		var out struct {
+			Data string `json:"data"`
+		}
 		_ = mc.CallJSON(ctx, "ssh_shell_read", map[string]any{
 			"session_id": "c1", "shell_id": "sh", "timeout_ms": 400,
 		}, &out)
@@ -1643,7 +1642,7 @@ func TestConcurrentReconnects(t *testing.T) {
 // appear, since the goal is to catch a regression where TOON encoding
 // silently falls back to JSON.
 func TestTOONFormat(t *testing.T) {
-	daemonBin, launcherBin := BuildBinaries(t)
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -1653,7 +1652,7 @@ func TestTOONFormat(t *testing.T) {
 	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Format: "toon"})
 	defer daemon.Stop()
 
-	mc := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc := NewMCPClientForDaemon(t, daemon)
 	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -1682,15 +1681,21 @@ func TestTOONFormat(t *testing.T) {
 	}
 }
 
+// mcpInitBody is a minimal MCP initialize request for /mcp probes.
+const mcpInitBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}`
+
 func TestUnauthorizedRejected(t *testing.T) {
-	daemonBin, _ := BuildBinaries(t)
-	daemon := StartDaemon(t, daemonBin)
+	daemonBin := BuildDaemon(t)
+	// Loopback binds skip auth by default (local WebUI / MCP clients are
+	// trusted); -require-auth forces the token check so this test can
+	// exercise it.
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{RequireAuth: true})
 	defer daemon.Stop()
 
 	// No Authorization header at all → 401.
-	resp, err := http.Get("http://" + daemon.addr + "/sse")
+	resp, err := http.Get("http://" + daemon.addr + "/mcp")
 	if err != nil {
-		t.Fatalf("GET /sse without auth: %v", err)
+		t.Fatalf("GET /mcp without auth: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
@@ -1701,35 +1706,39 @@ func TestUnauthorizedRejected(t *testing.T) {
 	}
 
 	// Wrong token → 401.
-	req, _ := http.NewRequest("GET", "http://"+daemon.addr+"/sse", nil)
+	req, _ := http.NewRequest("GET", "http://"+daemon.addr+"/mcp", nil)
 	req.Header.Set("Authorization", "Bearer notarealtoken")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("GET /sse with bad token: %v", err)
+		t.Fatalf("GET /mcp with bad token: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Fatalf("expected 401 for wrong token, got %d", resp.StatusCode)
 	}
 
-	// Right token → 200 (we don't drain the stream, just confirm the handshake passes).
+	// Right token → the request reaches the MCP layer. A valid initialize
+	// must not come back 401 (the transport's own status is its business).
 	tok, err := daemon_ReadHandle(daemon.handlePath)
 	if err != nil {
 		t.Fatalf("read token: %v", err)
 	}
 	for _, scheme := range []string{"Bearer", "bearer", "BEARER", "BeArEr"} {
-		req, _ = http.NewRequest("GET", "http://"+daemon.addr+"/sse", nil)
+		req, _ = http.NewRequest("POST", "http://"+daemon.addr+"/mcp",
+			strings.NewReader(mcpInitBody))
 		req.Header.Set("Authorization", scheme+" "+tok)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req = req.WithContext(ctx)
 		resp, err = http.DefaultClient.Do(req)
 		cancel()
 		if err != nil {
-			t.Fatalf("GET /sse with scheme %q: %v", scheme, err)
+			t.Fatalf("POST /mcp with scheme %q: %v", scheme, err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Fatalf("scheme %q expected 200, got %d", scheme, resp.StatusCode)
+		if resp.StatusCode == 401 {
+			t.Fatalf("scheme %q got 401 with a valid token", scheme)
 		}
 	}
 
@@ -1743,8 +1752,8 @@ func TestUnauthorizedRejected(t *testing.T) {
 	}
 }
 
-func TestLauncherAutoSpawnsDaemon(t *testing.T) {
-	daemonBin, launcherBin := BuildBinaries(t)
+func TestDaemonEnsureAutoSpawns(t *testing.T) {
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -1752,30 +1761,22 @@ func TestLauncherAutoSpawnsDaemon(t *testing.T) {
 	stateDir := t.TempDir()
 	handlePath := stateDir + "/daemon.json"
 
-	// Spawn the launcher WITHOUT -no-spawn; it must start the daemon itself.
-	// The daemon will pick a free port at :0 and publish addr+token to
-	// handlePath; the launcher reads it back.
-	cmd := exec.Command(launcherBin, "-handle", handlePath, "-daemon-binary", daemonBin)
-	cmd.Env = append(cmd.Environ(),
-		"REMOTE_SHELL_MCP_STATE="+stateDir+"/state.json",
-		"REMOTE_SHELL_MCP_LOCK="+stateDir+"/daemon.lock",
-		"REMOTE_SHELL_MCP_HANDLE="+handlePath,
-		// Pin JSON so the JSON-unmarshalling assertion below stays valid
-		// even though TOON is the production default.
-		"REMOTE_SHELL_MCP_FORMAT=json",
-	)
-	stdin, _ := cmd.StdinPipe()
-	stdout, _ := cmd.StdoutPipe()
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start launcher: %v", err)
+	// daemon.EnsureAt spawns the daemon itself when no live handle exists.
+	// The daemon picks a free port at :0 and publishes addr+token to
+	// handlePath; EnsureAt reads it back. Pass state/lock/handle + a JSON
+	// output pin as daemon args so this test's daemon is fully isolated.
+	handle, err := daemon.EnsureAt(handlePath, daemonBin, []string{
+		"-state", stateDir + "/state.json",
+		"-lock", stateDir + "/daemon.lock",
+		"-handle", handlePath,
+		"-format", "json",
+	})
+	if err != nil {
+		t.Fatalf("EnsureAt: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		// The daemon was spawned detached. Read its pid and wait for it to actually exit
-		// before TempDir cleanup tries to remove files the daemon still has open.
+		// The daemon was spawned detached. Read its pid and wait for it to
+		// actually exit before TempDir cleanup removes files it has open.
 		if pid, err := readPidFromLock(stateDir + "/daemon.lock"); err == nil {
 			_ = exec.Command("kill", "-TERM", strconv.Itoa(pid)).Run()
 			deadline := time.Now().Add(3 * time.Second)
@@ -1789,7 +1790,8 @@ func TestLauncherAutoSpawnsDaemon(t *testing.T) {
 		}
 	})
 
-	mc := AttachMCPClient(t, cmd, stdin, stdout)
+	d := &Daemon{addr: handle.Addr, handlePath: handlePath}
+	mc := NewMCPClientForDaemon(t, d)
 	defer mc.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1815,8 +1817,8 @@ func readPidFromLock(path string) (int, error) {
 	return strconv.Atoi(strings.TrimSpace(string(data)))
 }
 
-func TestDaemonSurvivesLauncherRestart(t *testing.T) {
-	daemonBin, launcherBin := BuildBinaries(t)
+func TestDaemonSurvivesClientReconnect(t *testing.T) {
+	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
@@ -1829,14 +1831,14 @@ func TestDaemonSurvivesLauncherRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	mc := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc := NewMCPClientForDaemon(t, daemon)
 	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "persist1", "spec": sshSpec(sshd.SSHPort)}); err != nil {
 		mc.Close()
 		t.Fatalf("connect: %v", err)
 	}
 	mc.Close()
 
-	mc2 := NewMCPClientForDaemon(t, launcherBin, daemon)
+	mc2 := NewMCPClientForDaemon(t, daemon)
 	defer mc2.Close()
 	var list []struct {
 		ID    string `json:"id"`
@@ -1854,6 +1856,6 @@ func TestDaemonSurvivesLauncherRestart(t *testing.T) {
 	}
 	if !found {
 		raw, _ := json.Marshal(list)
-		t.Fatalf("session did not survive launcher restart; ssh_list=%s", string(raw))
+		t.Fatalf("session did not survive client reconnect; ssh_list=%s", string(raw))
 	}
 }

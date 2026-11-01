@@ -1,6 +1,6 @@
 module github.com/jaenster/remote-shell-mcp
 
-go 1.25.5
+go 1.27.3
 
 require (
 	github.com/kevinburke/ssh_config v1.6.0

@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,9 +26,9 @@ import (
 
 const (
 	// Default addr binds the loopback to a kernel-picked free port. The actual
-	// bound address is written to daemon.json so the launcher can find us
-	// without hard-coding any port — sidesteps the well-known-port conflict
-	// (the previous default, 7800, is JGroups/JBoss).
+	// bound address is written to daemon.json so clients can find us without
+	// hard-coding any port — sidesteps the well-known-port conflict (the
+	// previous default, 7800, is JGroups/JBoss).
 	defaultAddr = "127.0.0.1:0"
 	serverName  = "remote-shell-mcp"
 	serverVer   = "0.1.0"
@@ -36,9 +38,10 @@ func main() {
 	addr := flag.String("addr", envOr("REMOTE_SHELL_MCP_ADDR", defaultAddr), "Bind address for the SSE MCP server (host:port). Port 0 means \"pick a free port\".")
 	statePath := flag.String("state", envOr("REMOTE_SHELL_MCP_STATE", ""), "Path to state.json (default: $XDG_CONFIG_HOME/remote-shell-mcp/state.json).")
 	lockPath := flag.String("lock", envOr("REMOTE_SHELL_MCP_LOCK", ""), "Path to daemon lock file.")
-	handlePath := flag.String("handle", envOr("REMOTE_SHELL_MCP_HANDLE", ""), "Path to the handle file. Daemon writes {addr,token,pid} here after binding so the launcher can find it.")
+	handlePath := flag.String("handle", envOr("REMOTE_SHELL_MCP_HANDLE", ""), "Path to the handle file. Daemon writes {addr,token,pid} here after binding so clients can find it.")
 	logFmt := flag.String("log", envOr("REMOTE_SHELL_MCP_LOG", "text"), "Log format: text or json.")
 	outFmt := flag.String("format", envOr("REMOTE_SHELL_MCP_FORMAT", "toon"), "Tool-result output format: toon (default) or json. TOON is ~30-50% smaller for arrays of uniform objects (docker_containers, ssh_file_list, etc.) — see https://github.com/toon-format/spec.")
+	requireAuth := flag.Bool("require-auth", envOr("REMOTE_SHELL_MCP_REQUIRE_AUTH", "") == "true", "Require the bearer token even on loopback binds. Non-loopback binds always require it.")
 	flag.Parse()
 
 	format, err := mcptools.ParseFormat(*outFmt)
@@ -129,18 +132,26 @@ func main() {
 	st.Start()
 
 	mcpServer := mcptools.Build(st, serverName, serverVer)
-	sseServer := server.NewSSEServer(mcpServer,
-		server.WithKeepAlive(true),
-		server.WithKeepAliveInterval(15*time.Second),
+	streamable := server.NewStreamableHTTPServer(mcpServer,
+		server.WithEndpointPath("/mcp"),
+		server.WithHeartbeatInterval(15*time.Second),
 	)
-	// /rpc is a one-shot JSON-RPC endpoint for the CLI; /sse + /message stay
-	// for the stdio proxy. Both sit behind the same bearer-auth middleware.
+	// Two transports: /rpc is one-shot JSON-RPC POST; /mcp is the spec
+	// Streamable HTTP endpoint remote MCP clients register against.
 	mux := http.NewServeMux()
 	mux.Handle("/rpc", daemon.RPCHandler(mcpServer))
-	mux.Handle("/", sseServer)
-	authed := daemon.AuthMiddleware(token, mux)
+	mux.Handle("/mcp", streamable)
+	// Loopback binds serve local clients and the embedded WebUI — both
+	// already hold machine-local trust, so bearer auth is skipped there.
+	// A non-loopback bind (LAN/tunnel exposure) keeps the token requirement.
+	var root http.Handler = mux
+	if *requireAuth || !isLoopbackBind(boundAddr) {
+		root = daemon.AuthMiddleware(token, mux)
+	} else {
+		log.Info("loopback bind: bearer auth disabled", "addr", boundAddr)
+	}
 	httpSrv := &http.Server{
-		Handler: authed,
+		Handler: root,
 		// Defend against slowloris from a local process holding a connection
 		// open without sending headers. SSE handlers explicitly want long-lived
 		// connections, so we don't set ReadTimeout / WriteTimeout (which would
@@ -151,7 +162,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", boundAddr, "sse", "/sse", "message", "/message", "rpc", "/rpc",
+		log.Info("listening", "addr", boundAddr, "mcp", "/mcp", "rpc", "/rpc",
 			"state", store.Path(), "handle", *handlePath, "format", string(format))
 		errCh <- httpSrv.Serve(ln)
 	}()
@@ -170,7 +181,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sseServer.CloseSessions()
+	_ = streamable.Shutdown(ctx)
 	_ = httpSrv.Shutdown(ctx)
 
 	// Stop the flusher (drains its goroutine and does one final synchronous
@@ -187,4 +198,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// isLoopbackBind reports whether addr's host part is a loopback IP or a name
+// that resolves there ("localhost"). Port is ignored.
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback()
 }

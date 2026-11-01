@@ -10,8 +10,8 @@ import (
 
 // RPCHandler exposes the MCP JSON-RPC surface as a plain request/response HTTP
 // endpoint, so a CLI client can POST a single JSON-RPC request and get a single
-// JSON-RPC response back inline — no SSE bookkeeping. The launcher's stdio
-// proxy still drives /sse + /message as before; /rpc is a parallel transport
+// JSON-RPC response back inline — no streaming bookkeeping. /rpc is the
+// one-shot companion to the Streamable HTTP endpoint at /mcp
 // for one-shot use (and the same handler runs every tool, so behavior is
 // identical to what an MCP client sees).
 //

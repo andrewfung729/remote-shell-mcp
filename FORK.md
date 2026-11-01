@@ -20,7 +20,28 @@ adapting to our narrower surface.
   branches, //go:build !windows tags (files renamed *_unix.go ->
   *_impl.go), windows/freebsd/exotic-arch entries in .goreleaser.yaml,
   windows-latest in install-smoke CI, %APPDATA% config paths in
-  internal/setup/clients.go.
+  internal/setup/clients.go. (internal/setup, internal/launcher, and
+  install.sh were later deleted entirely — see the next divergence.)
 - **Cherry-pick note**: skip upstream patches touching install.ps1,
   *_windows.go, or windows/freebsd release-matrix entries. Resolves upstream
   issue jaenster/remote-shell-mcp#1 by deletion, not fix.
+
+### Client transport: remote-MCP daemon only, no stdio launcher
+
+- **What**: dropped the entire stdio client surface. Only the daemon binary
+  (`remote-shell-mcpd`) remains. Upstream ships `remote-shell-mcp` (stdio
+  launcher → SSE proxy → daemon) plus `remote-shell-mcp setup` (writes the
+  launcher into client configs) plus a curl installer. All three are gone.
+- **Why**: the product direction is a remote-MCP daemon + Mac app, where a
+  client registers a URL rather than exec'ing a stdio binary. Full
+  rationale: docs/adr/0002-pivot-remote-mcp-mac-app.md.
+- **Removed**: cmd/remote-shell-mcp, internal/launcher/proxy.go,
+  internal/setup/, install.sh, .github/workflows/install-smoke.yml.
+- **Kept**: the daemon auto-spawn helper moved to internal/daemon/spawn.go
+  (`Ensure`/`EnsureAt`); the daemon's `/rpc` POST endpoint is now the
+  e2e transport. `/sse`+`/message` was later replaced by the spec
+  Streamable HTTP transport at `/mcp`.
+- **Cherry-pick note**: upstream patches to the stdio launcher, the `setup`
+  command, install.sh, or stdio-transport fixes are no-ops here — that code
+  does not exist. Daemon-side fixes (sshx, dockerx, mcptools, state,
+  daemon's own server) still apply.

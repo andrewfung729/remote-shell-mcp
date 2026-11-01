@@ -5,6 +5,7 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
 ## Unreleased
 
 - **Fork: dropped Windows and FreeBSD support.** This fork targets macOS and Linux only. Removed `install.ps1`, the Windows daemon lock (`LockFileEx`) and spawn-detach implementations, all `runtime.GOOS == "windows"` branches, and the Windows/FreeBSD/armv7/riscv64 release and CI matrices. Supported targets: darwin amd64/arm64/universal, linux amd64/arm64. (Resolves upstream jaenster/remote-shell-mcp#1 by removing the affected surface rather than fixing the PowerShell 302 bug — Windows install is no longer offered.)
+- **Fork: removed the stdio client surface — daemon-only, heading for remote-MCP + Mac app.** Deleted `cmd/remote-shell-mcp` (stdio launcher, `setup` subcommand, one-shot CLI), `internal/launcher/proxy.go`, `internal/setup/` (client config registrar), `install.sh`, and the `install-smoke` CI. The daemon auto-spawn helper moved to `internal/daemon/spawn.go` (`Ensure`/`EnsureAt`); e2e now talks to the daemon over HTTP `/rpc` instead of spawning a stdio launcher. **Note**: MCP clients that only speak stdio can no longer connect — a spec-compliant Streamable HTTP transport + remote auth are not built yet (see docs/adr/0002).
 
 ## v0.1.8 — 2026-05-14
 

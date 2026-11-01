@@ -52,7 +52,7 @@ func TestLockReleaseAllowsReacquire(t *testing.T) {
 }
 
 // TestLockWritesPID — ReadPid must return whatever AcquireLock wrote, so the
-// launcher can show "daemon running as pid N" diagnostics.
+// clients can show "daemon running as pid N" diagnostics.
 func TestLockWritesPID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.lock")

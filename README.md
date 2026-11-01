@@ -11,14 +11,21 @@
 
 `remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines and containers — `ssh_exec`, persistent PTY shells with state preserved between calls, `-L`/`-R`/`-D` port forwards, SFTP round-trips, Docker over `unix://`, `tcp://`, or `ssh://`, container lifecycle, image pulls, and `docker_run`.
 
-It runs as a daemon. Your MCP client talks to a tiny stdio launcher that auto-spawns the daemon on first use and proxies over SSE. The daemon outlives every client restart, every Claude Code reload, every "did the bridge just hang up?" — so the `vim` you opened over a PTY, the SOCKS proxy you set up to reach a database, the keepalive on a flaky link, all keep running.
+It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the SOCKS proxy you set up to reach a database, the keepalive on a flaky link, all keep running.
+
+> **This fork is mid-pivot** to a remote-MCP server + Mac app (see
+> docs/adr/0002). The stdio launcher, per-client `setup` registrar, and curl
+> installer have been removed. The daemon now serves the spec Streamable
+> HTTP transport at `/mcp` plus a one-shot `/rpc` POST endpoint. Loopback
+> binds are unauthenticated (local clients and the embedded WebUI are
+> trusted); a non-loopback bind still requires the bearer token.
 
 ```
-┌──────────────┐   stdio    ┌──────────────────────┐    SSE/HTTP    ┌────────────────────────┐
-│ Claude Code  │ ◀────────▶ │ remote-shell-mcp     │ ◀───────────▶ │ remote-shell-mcpd      │
-│ (or Cursor,  │   JSON-RPC │ stdio launcher       │  Bearer token │ daemon: SSH sessions,  │
-│ Desktop, …)  │            │ auto-spawns + retries │                │ port forwards, Docker  │
-└──────────────┘            └──────────────────────┘                └────────────────────────┘
+┌──────────────┐   remote MCP (HTTP)   ┌────────────────────────┐
+│ MCP client   │ ◀──────────────────▶ │ remote-shell-mcpd      │
+│ (registers   │    Bearer token      │ daemon: SSH sessions,  │
+│  a URL)      │                      │ port forwards, Docker  │
+└──────────────┘                      └────────────────────────┘
 ```
 
 ## Features
@@ -34,78 +41,35 @@ It runs as a daemon. Your MCP client talks to a tiny stdio launcher that auto-sp
 | **Container shells** | persistent TTY shells inside containers, same model as SSH shells |
 | **Images** | `docker_image_list`, `docker_image_pull` (blocks until done), `docker_image_remove` |
 | **Persistence** | session and forward specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
-| **Auth** | 32-byte random Bearer token on the SSE endpoint, rotated each daemon restart, stored 0600 in the same config dir |
-| **Bridge** | launcher reconnects with exponential backoff if the daemon flaps; survives token rotation; parallel POST dispatch (up to 128 in flight) |
+| **Auth** | 32-byte random Bearer token, rotated each daemon restart, stored 0600 in the same config dir. Loopback binds skip auth by default (`-require-auth` to force); non-loopback always requires it. |
+| **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport); `/rpc` one-shot JSON-RPC POST. |
 | **Output** | [TOON](https://github.com/toon-format/toon) by default — compact, line-oriented format that's ~30–50% smaller than JSON for the uniform-array payloads this daemon returns (`docker_containers`, `ssh_file_list`, etc.). `-format json` reverts to JSON for clients that prefer it. |
 
-## Install
+## Run the daemon
 
-One-liner (Linux / macOS, amd64 or arm64):
-
-```
-curl -fsSL https://raw.githubusercontent.com/jaenster/remote-shell-mcp/main/install.sh | sh
-```
-
-That fetches the latest release, places both binaries on `PATH` (`/usr/local/bin` if writable, else `~/.local/bin`), and runs `remote-shell-mcp setup` to register itself with every MCP client it detects on the system.
-
-Flags the script accepts:
+There is one binary: `remote-shell-mcpd`. Build it from source (macOS / Linux, amd64 or arm64):
 
 ```
-| sh -s -- --version v0.1.0     # pin a specific release
-| sh -s -- --dir /usr/local/bin # explicit install dir
-| sh -s -- --no-setup           # don't wire into MCP clients
-| sh -s -- --yes                # non-interactive setup (install into every detected client)
-```
-
-### Alternatives
-
-```
-# Go users — single command, builds from source.
-go install github.com/jaenster/remote-shell-mcp/cmd/remote-shell-mcp@latest
-go install github.com/jaenster/remote-shell-mcp/cmd/remote-shell-mcpd@latest
-remote-shell-mcp setup
-```
-
-```
-# Build from source manually:
-git clone https://github.com/jaenster/remote-shell-mcp && cd remote-shell-mcp
+git clone https://github.com/andrewfung729/remote-shell-mcp && cd remote-shell-mcp
 go build -o bin/remote-shell-mcpd ./cmd/remote-shell-mcpd
-go build -o bin/remote-shell-mcp  ./cmd/remote-shell-mcp
-cp bin/remote-shell-mcp{,d} ~/.local/bin/
-remote-shell-mcp setup
+./bin/remote-shell-mcpd
 ```
 
-### `setup` — auto-register with MCP clients
-
-`remote-shell-mcp setup` detects supported clients and offers to add itself in each one's config. Currently:
-
-| Client | Config file |
-|-|-|
-| **Claude Code CLI** | `~/.claude.json` `mcpServers` block |
-| **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) / `~/.config/Claude` (Linux) |
-| **Codex CLI** | `~/.codex/config.toml` `[mcp_servers.<name>]` block |
-
-The setup command is idempotent (re-running it is a no-op if the entry already exists with the same command), backs up any existing config file to `.bak` before writing, and supports `--dry-run` to preview the change.
-
 ```
-remote-shell-mcp setup                 # interactive: asks about each detected client
-remote-shell-mcp setup --yes           # install into every detected client
-remote-shell-mcp setup --dry-run       # show what would be written, touch no files
-remote-shell-mcp setup --client codex  # only this one
-remote-shell-mcp setup --name my-shell # register under a different MCP server name
+# Or via Go:
+go install github.com/jaenster/remote-shell-mcp/cmd/remote-shell-mcpd@latest
+remote-shell-mcpd
 ```
 
-If you'd rather edit configs by hand, the format is just:
+On first run it binds a kernel-picked loopback port, generates a bearer
+token, and writes `{addr, token, pid}` to `daemon.json` in the config dir
+so clients can find it. On a loopback bind, point any remote-MCP client at
+`http://<addr>/mcp` — no auth header needed. For one-shot calls,
+`http://<addr>/rpc` takes a plain JSON-RPC POST.
 
-```json
-{
-  "mcpServers": {
-    "remote-shell": { "command": "/absolute/path/to/remote-shell-mcp" }
-  }
-}
-```
-
-The launcher takes no required flags. The first MCP call auto-spawns the daemon detached.
+A headless/bootstrap caller can also bring a daemon up on demand via
+`daemon.Ensure(binary, args)` in-process — the same helper the future Mac
+app uses — but there is no stdio launcher binary to exec from an MCP host.
 
 ## How it compares
 
@@ -129,24 +93,21 @@ A stdio MCP server lives and dies with each client connection. That's fine for s
 
 ## Configuration
 
-The launcher takes no required flags. Environment overrides (also accepted as `-flags` on either binary):
+The daemon takes no required flags. Environment overrides (also accepted as `-flags`):
 
 | Variable | Effect |
 |-|-|
-| `REMOTE_SHELL_MCP_ADDR` | daemon bind address (default `127.0.0.1:7800`) |
-| `REMOTE_SHELL_MCP_DAEMON` | path to the daemon binary (launcher) |
-| `REMOTE_SHELL_MCP_STATE` | state file path (daemon-side) |
-| `REMOTE_SHELL_MCP_LOCK` | lock file path (daemon-side) |
-| `REMOTE_SHELL_MCP_TOKEN` | auth token file path (both sides) |
+| `REMOTE_SHELL_MCP_ADDR` | bind address (default `127.0.0.1:0`, a kernel-picked free port) |
+| `REMOTE_SHELL_MCP_STATE` | state file path |
+| `REMOTE_SHELL_MCP_LOCK` | lock file path |
+| `REMOTE_SHELL_MCP_HANDLE` | handle file path (where `{addr,token,pid}` is published) |
 | `REMOTE_SHELL_MCP_FORMAT` | tool result output: `toon` (default) or `json` |
 
 Defaults live in `$XDG_CONFIG_HOME/remote-shell-mcp/` (`~/.config/remote-shell-mcp/` on Linux, `~/Library/Application Support/remote-shell-mcp/` on macOS).
 
 ## Auth
 
-The daemon generates a fresh 32-byte random token on startup and writes it to `daemon.token` (mode 0600). Every request to the SSE endpoint requires `Authorization: Bearer <token>` (RFC 7235 case-insensitive scheme; constant-time compare). Unauthenticated requests get `401 Unauthorized`. The launcher reads the token before connecting and re-reads on every reconnect, so a daemon restart that rotates the token doesn't break the bridge.
-
-A local non-root attacker on the same host can't drive your SSH/Docker sessions just by hitting `127.0.0.1:7800` — they'd also need read access to the token file in your home directory.
+The daemon generates a fresh 32-byte random token on startup and publishes it in `daemon.json` (mode 0600). Requests to a **non-loopback** bind require `Authorization: Bearer <token>` (RFC 7235 case-insensitive scheme; constant-time compare) — unauthenticated requests get `401 Unauthorized`. On loopback binds auth is skipped by default (the threat model is any local process already owns you; `-require-auth` forces the check anyway). A client reads the token from the handle file before connecting, so a daemon restart that rotates the token just means re-reading the file.
 
 ## End-to-end tests
 
@@ -163,23 +124,21 @@ The suite (30+ tests, race-clean) exercises:
 - Forwards: `-L` via real `http.Get`, `-R` with the container `curl`ing back to a Go server in the test process, `-D` SOCKS5 via `golang.org/x/net/proxy`
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
 - Docker: unix socket and `ssh://` schemes, list/disconnect, container lifecycle, persistent in-container shell, image pull + run + logs + remove
-- Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 6 truly-parallel MCP clients (separate launchers), 12 overlapping connect/disconnect pairs
-- Bridge: launcher auto-spawn, daemon survives launcher restart, 2 MiB MCP response round-trip
+- Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
+- Daemon: `daemon.Ensure` auto-spawn, daemon survives client disconnect/reconnect, 2 MiB MCP response round-trip
 - Auth: 401 path with multiple `Bearer` casings, 0600 token file mode
 
 ## Project layout
 
 ```
 cmd/
-  remote-shell-mcpd/   daemon entry point
-  remote-shell-mcp/    stdio launcher entry point
+  remote-shell-mcpd/   daemon entry point (the only binary)
 internal/
   sshx/                SSH manager, dial chain, forwards, PTY shells, SFTP, keepalive
   dockerx/             Docker manager (unix/tcp/ssh hosts), container/image ops, shells, run
   mcptools/            MCP tool registrations, debounced state flusher
   state/               on-disk snapshot/restore
-  daemon/              pidfile lock, auth token, default paths
-  launcher/            stdio↔SSE proxy with parallel POST + reconnect backoff
+  daemon/              pidfile lock, auth token, handle publish, /rpc endpoint, auto-spawn (Ensure)
 test/e2e/              end-to-end tests + sshd container Dockerfile
 ```
 

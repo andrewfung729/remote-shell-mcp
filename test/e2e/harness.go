@@ -44,36 +44,30 @@ func RepoRoot(t *testing.T) string {
 var (
 	buildOnce sync.Once
 	buildErr  error
-	builtBins struct{ daemon, launcher string }
+	builtBin  string
 )
 
-func BuildBinaries(t *testing.T) (daemonBin, launcherBin string) {
+// BuildDaemon builds the remote-shell-mcpd binary once for the suite. The
+// daemon is the only binary — there is no stdio launcher to build.
+func BuildDaemon(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
 		root := RepoRoot(t)
-		binDir := filepath.Join(root, "bin")
-		builtBins.daemon = filepath.Join(binDir, "remote-shell-mcpd")
-		builtBins.launcher = filepath.Join(binDir, "remote-shell-mcp")
-		// Always rebuild — Go's build cache makes incremental rebuilds cheap, and
-		// stale binaries from an earlier `go build` cycle silently mask source changes.
-		for _, b := range []struct{ out, pkg string }{
-			{"bin/remote-shell-mcpd", "./cmd/remote-shell-mcpd"},
-			{"bin/remote-shell-mcp", "./cmd/remote-shell-mcp"},
-		} {
-			cmd := exec.Command("go", "build", "-o", b.out, b.pkg)
-			cmd.Dir = root
-			cmd.Stdout = os.Stderr
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				buildErr = fmt.Errorf("build %s: %w", b.pkg, err)
-				return
-			}
+		builtBin = filepath.Join(root, "bin", "remote-shell-mcpd")
+		// Always rebuild: Go's build cache makes incremental rebuilds cheap,
+		// and a stale binary masks source changes.
+		cmd := exec.Command("go", "build", "-o", "bin/remote-shell-mcpd", "./cmd/remote-shell-mcpd")
+		cmd.Dir = root
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			buildErr = fmt.Errorf("build remote-shell-mcpd: %w", err)
 		}
 	})
 	if buildErr != nil {
 		t.Fatalf("%v", buildErr)
 	}
-	return builtBins.daemon, builtBins.launcher
+	return builtBin
 }
 
 func EnsureDockerImage(t *testing.T) {
@@ -226,11 +220,12 @@ type Daemon struct {
 }
 
 type DaemonOpts struct {
-	StatePath  string
-	LockPath   string
-	HandlePath string
-	Env        []string
-	Format     string // override -format flag; empty = json (test default)
+	StatePath   string
+	LockPath    string
+	HandlePath  string
+	Env         []string
+	Format      string // override -format flag; empty = json (test default)
+	RequireAuth bool   // force bearer auth on the loopback bind (-require-auth)
 }
 
 func StartDaemon(t *testing.T, daemonBin string) *Daemon {
@@ -268,6 +263,9 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 		cmd.Args = append(cmd.Args, "-format", opts.Format)
 	} else {
 		cmd.Args = append(cmd.Args, "-format", "json")
+	}
+	if opts.RequireAuth {
+		cmd.Args = append(cmd.Args, "-require-auth")
 	}
 	cmd.Env = append(os.Environ(), opts.Env...)
 	var stderr bytes.Buffer
@@ -311,8 +309,8 @@ func (d *Daemon) Stop() {
 	if d == nil || d.cmd == nil || d.cmd.Process == nil {
 		return
 	}
-	// SIGTERM gives the daemon a chance to flush state and call CloseSessions
-	// on SSE clients. Escalate to SIGKILL via ctx cancel if it ignores us.
+	// SIGTERM gives the daemon a chance to flush state and shut down its
+	// transport sessions. Escalate to SIGKILL via ctx cancel if it ignores us.
 	_ = d.cmd.Process.Signal(syscall.SIGTERM)
 	graceful := make(chan struct{})
 	go func() { _ = d.cmd.Wait(); close(graceful) }()
