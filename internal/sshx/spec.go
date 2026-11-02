@@ -5,16 +5,17 @@ import (
 	"time"
 )
 
+// ConnectSpec is resolved entirely from the daemon user's ~/.ssh/config —
+// callers (tools, WebUI) never construct it with connection details; the
+// manager fills every field from the Host entry that matches the alias.
+// It stays a struct (not a bare alias) so the resolved values travel with
+// the session for reconnects.
 type ConnectSpec struct {
 	User           string     `json:"user"`
 	Addresses      []string   `json:"addresses"`
 	JumpHosts      []JumpHost `json:"jump_hosts,omitempty"`
 	KnownHostsPath string     `json:"known_hosts_path,omitempty"`
-	Insecure       bool       `json:"insecure,omitempty"`
 	Timeout        Duration   `json:"timeout,omitempty"`
-	Keepalive      Duration   `json:"keepalive,omitempty"`
-	AutoReconnect  bool       `json:"auto_reconnect,omitempty"`
-	Persistent     bool       `json:"persistent,omitempty"`
 	// Auth is resolved, never supplied: Connect fills it from the daemon
 	// user's ~/.ssh/config (IdentityFile / IdentityAgent). An agent cannot
 	// pick credentials — a spec whose host has no resolvable auth fails.
@@ -25,7 +26,6 @@ type JumpHost struct {
 	User           string   `json:"user"`
 	Addresses      []string `json:"addresses"`
 	KnownHostsPath string   `json:"known_hosts_path,omitempty"`
-	Insecure       bool     `json:"insecure,omitempty"`
 	Timeout        Duration `json:"timeout,omitempty"`
 	Auth           AuthSpec `json:"-"`
 }

@@ -70,13 +70,19 @@ func (t *ToolToggler) Set(name string, enabled bool) bool {
 	return true
 }
 
+// exposureGatedTools are hidden from tools/list until at least one host is
+// exposed — an unconfigured daemon offers nothing to agents.
+var exposureGatedTools = []string{SSHHostsTool, SSHShellTool}
+
 // ExposedHosts returns the aliases the user has exposed to agents.
 func (t *ToolToggler) ExposedHosts() []string {
 	return t.st.ExposedHosts()
 }
 
-// SetExposedHost turns one configured alias on or off for agents, then shows
-// or hides ssh_hosts to match. The host list is persisted either way.
+// SetExposedHost turns one configured alias on or off for agents, then
+// shows or hides the gated tools to match. Turning a host OFF immediately
+// disconnects its session and closes its shells — revocation has no grace
+// window. The host list is persisted either way.
 func (t *ToolToggler) SetExposedHost(alias string, on bool) {
 	cur := t.st.ExposedHosts()
 	next := make([]string, 0, len(cur)+1)
@@ -95,24 +101,33 @@ func (t *ToolToggler) SetExposedHost(alias string, on bool) {
 		next = append(next, alias)
 	}
 	t.st.SetExposedHosts(next)
-	t.alignSSHHostsTool()
-}
-
-// ClearExposedHosts turns every host off and hides ssh_hosts.
-func (t *ToolToggler) ClearExposedHosts() {
-	t.st.SetExposedHosts(nil)
-	t.alignSSHHostsTool()
-}
-
-// alignSSHHostsTool makes the ssh_hosts tool visible exactly when at least
-// one host is exposed.
-func (t *ToolToggler) alignSSHHostsTool() {
-	on := len(t.st.ExposedHosts()) > 0
-	if t.Enabled(SSHHostsTool) == on {
-		_ = t.st.Persist()
-		return
+	if !on {
+		// Disconnect is a no-op when the session doesn't exist.
+		_ = t.st.SSH.Disconnect(alias)
 	}
-	t.Set(SSHHostsTool, on)
+	t.alignGatedTools()
+}
+
+// ClearExposedHosts turns every host off, drops every host session, and
+// hides the gated tools.
+func (t *ToolToggler) ClearExposedHosts() {
+	for _, a := range t.st.ExposedHosts() {
+		_ = t.st.SSH.Disconnect(a)
+	}
+	t.st.SetExposedHosts(nil)
+	t.alignGatedTools()
+}
+
+// alignGatedTools makes the exposure-gated tools visible exactly when at
+// least one host is exposed.
+func (t *ToolToggler) alignGatedTools() {
+	on := len(t.st.ExposedHosts()) > 0
+	for _, name := range exposureGatedTools {
+		if t.Enabled(name) != on {
+			t.Set(name, on)
+		}
+	}
+	_ = t.st.Persist()
 }
 
 // Enabled reports whether name is registered and currently visible to MCP clients.

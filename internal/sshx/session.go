@@ -1,9 +1,7 @@
 package sshx
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -35,7 +33,7 @@ type Session struct {
 	connectedAt time.Time
 
 	shellsMu sync.Mutex
-	shells   map[string]*Shell
+	shells   map[string]*Shell // keyed by shell name
 
 	sftpMu sync.Mutex
 	sftp   *sftp.Client
@@ -161,8 +159,6 @@ func (s *Session) Info() SessionInfo {
 		LastError:     lastErr,
 		ConnectedAt:   connAt,
 		Shells:        shells,
-		Persistent:    s.Spec.Persistent,
-		AutoReconnect: s.Spec.AutoReconnect,
 	}
 }
 
@@ -175,97 +171,4 @@ type SessionInfo struct {
 	LastError     string    `json:"last_error,omitempty"`
 	ConnectedAt   time.Time `json:"connected_at,omitempty"`
 	Shells        []string  `json:"shells"`
-	Persistent    bool      `json:"persistent"`
-	AutoReconnect bool      `json:"auto_reconnect"`
-}
-
-// SessionRow is the compact, primitive-only projection used by ssh_sessions:
-// every field is a flat scalar so the list renders as a clean table. The
-// full SessionInfo (addresses, shells) lives on the session itself.
-type SessionRow struct {
-	ID            string `json:"id"`
-	User          string `json:"user"`
-	Address       string `json:"address"` // active_address, else addresses[0]
-	State         string `json:"state"`
-	LastError     string `json:"last_error"` // empty when none; kept (no omitempty) so tabular form stays uniform
-	Persistent    bool   `json:"persistent"`
-	AutoReconnect bool   `json:"auto_reconnect"`
-	Shells        int    `json:"shells"`
-}
-
-func (i SessionInfo) Row() SessionRow {
-	addr := i.ActiveAddress
-	if addr == "" && len(i.Addresses) > 0 {
-		addr = i.Addresses[0]
-	}
-	return SessionRow{
-		ID: i.ID, User: i.User, Address: addr, State: i.State, LastError: i.LastError,
-		Persistent: i.Persistent, AutoReconnect: i.AutoReconnect,
-		Shells: len(i.Shells),
-	}
-}
-
-type ExecResult struct {
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
-}
-
-type ExecOptions struct {
-	Env   map[string]string
-	Stdin string
-}
-
-func (s *Session) Exec(ctx context.Context, command string, opts ExecOptions) (*ExecResult, error) {
-	client, err := s.getClient()
-	if err != nil {
-		return nil, err
-	}
-	sess, err := client.NewSession()
-	if err != nil {
-		return nil, fmt.Errorf("new ssh channel: %w", err)
-	}
-	defer sess.Close()
-
-	for k, v := range opts.Env {
-		if err := sess.Setenv(k, v); err != nil {
-			// Many servers refuse Setenv; treat as soft failure.
-			_ = err
-		}
-	}
-	if opts.Stdin != "" {
-		sess.Stdin = bytes.NewBufferString(opts.Stdin)
-	}
-
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
-
-	done := make(chan error, 1)
-	go func() { done <- sess.Run(command) }()
-
-	select {
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGKILL)
-		// Many servers / processes ignore signals over SSH. Don't wait forever:
-		// after a short grace period force-close the channel so sess.Run returns.
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			_ = sess.Close()
-			<-done
-		}
-		return nil, ctx.Err()
-	case runErr := <-done:
-		res := &ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
-		if runErr == nil {
-			return res, nil
-		}
-		var exitErr *ssh.ExitError
-		if errors.As(runErr, &exitErr) {
-			res.ExitCode = exitErr.ExitStatus()
-			return res, nil
-		}
-		return res, runErr
-	}
 }

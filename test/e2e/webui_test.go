@@ -18,9 +18,12 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// WebUI API + tool-toggling e2e. These exercise the real daemon over HTTP at
-// the /api surface — no sshd needed for the toggling/status paths.
+// WebUI API + tool-toggling e2e. These exercise the real daemon over HTTP
+// at the /api surface — token auth first, then the cookie.
 
+// apiJSON sends one /api request carrying the session cookie the daemon
+// issued (d.authCookie, set by exchangeToken). Tests that never exchanged
+// get 401 — which is exactly what the auth tests assert on.
 func apiJSON(t *testing.T, d *Daemon, method, path string, body map[string]any, out any) int {
 	t.Helper()
 	var rdr *strings.Reader
@@ -37,6 +40,9 @@ func apiJSON(t *testing.T, d *Daemon, method, path string, body map[string]any, 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if d.authCookie != "" {
+		req.Header.Set("Cookie", d.authCookie)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
@@ -48,8 +54,19 @@ func apiJSON(t *testing.T, d *Daemon, method, path string, body map[string]any, 
 	return resp.StatusCode
 }
 
+// startAuthedDaemon boots a daemon and completes the token exchange so the
+// returned Daemon's /api calls are authenticated.
+func startAuthedDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	daemonBin := BuildDaemon(t)
+	d := StartDaemon(t, daemonBin)
+	t.Cleanup(d.Stop)
+	exchangeToken(t, d)
+	return d
+}
+
 func TestWebUIStatus(t *testing.T) {
-	d := startGuardDaemon(t)
+	d := startAuthedDaemon(t)
 	var st struct {
 		Uptime    string `json:"uptime"`
 		Version   string `json:"version"`
@@ -65,11 +82,70 @@ func TestWebUIStatus(t *testing.T) {
 }
 
 func TestWebUIPageServed(t *testing.T) {
-	d := startGuardDaemon(t)
+	d := startAuthedDaemon(t)
 	if code := httpReq(t, d, "GET", "/", d.Addr(), "", "", ""); code != 200 {
 		t.Fatalf("GET / = %d, want 200", code)
 	}
 }
+
+// --- WebUI auth (issue #14) ---------------------------------------------------
+
+func TestWebUIAuthRequired(t *testing.T) {
+	daemonBin := BuildDaemon(t)
+	d := StartDaemon(t, daemonBin)
+	t.Cleanup(d.Stop)
+
+	// No cookie → every /api route is 401.
+	for _, p := range []string{"/status", "/sessions", "/hosts", "/tools"} {
+		if code := apiJSON(t, d, "GET", p, nil, nil); code != 401 {
+			t.Fatalf("GET /api%s without cookie = %d, want 401", p, code)
+		}
+	}
+	// The page itself is public — it carries no data; its fetches 401 until
+	// the operator pastes the token.
+	if code := httpReq(t, d, "GET", "/", d.Addr(), "", "", ""); code != 200 {
+		t.Fatalf("GET / = %d, want 200", code)
+	}
+	// /mcp stays unauthenticated — MCP clients need no token.
+	init := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	if code := httpReq(t, d, "POST", "/mcp", d.Addr(), "", "application/json", init); code == 401 || code == 403 {
+		t.Fatalf("/mcp initialize = %d, want not-4xx-auth", code)
+	}
+}
+
+func TestWebUITokenExchange(t *testing.T) {
+	daemonBin := BuildDaemon(t)
+	d := StartDaemon(t, daemonBin)
+	t.Cleanup(d.Stop)
+
+	token := d.Token()
+	if token == "" {
+		t.Fatal("daemon printed no token")
+	}
+	// Bad token → 403.
+	if code, _ := apiExchange(t, d, "wrong-token"); code != 403 {
+		t.Fatalf("bad token exchange = %d, want 403", code)
+	}
+	// Real token → 200 + cookie; cookie then authorizes /api.
+	code, cookie := apiExchange(t, d, token)
+	if code != 200 {
+		t.Fatalf("token exchange = %d", code)
+	}
+	if cookie == "" {
+		t.Fatal("no rsm_auth cookie set")
+	}
+	d.authCookie = cookie
+	if code := apiJSON(t, d, "GET", "/status", nil, nil); code != 200 {
+		t.Fatalf("GET /api/status with cookie = %d", code)
+	}
+	// Replay: the token is single-use — a second exchange fails even with
+	// the same value.
+	if code, _ := apiExchange(t, d, token); code != 403 {
+		t.Fatalf("token replay = %d, want 403", code)
+	}
+}
+
+// --- hosts / exposure ---------------------------------------------------------
 
 type hostsView struct {
 	Hosts []struct {
@@ -92,7 +168,7 @@ func getHosts(t *testing.T, d *Daemon) hostsView {
 }
 
 func TestWebUIHostsHiddenUntilExposed(t *testing.T) {
-	d := startGuardDaemon(t)
+	d := startAuthedDaemon(t)
 	body := httpBody(t, d, "GET", "/")
 	if !strings.Contains(body, "SSH Hosts") || !strings.Contains(body, "exposes that host") {
 		t.Fatalf("page missing per-host switches")
@@ -103,8 +179,8 @@ func TestWebUIHostsHiddenUntilExposed(t *testing.T) {
 			t.Fatalf("host %s exposed by default", h.Alias)
 		}
 	}
-	if toolListed(t, d, "ssh_hosts") {
-		t.Fatalf("ssh_hosts listed before any host was exposed")
+	if toolListed(t, d, "ssh_hosts") || toolListed(t, d, "ssh_shell") {
+		t.Fatalf("gated tools listed before any host was exposed")
 	}
 	if len(view.Hosts) == 0 {
 		t.Skip("no concrete hosts in ssh config")
@@ -113,8 +189,8 @@ func TestWebUIHostsHiddenUntilExposed(t *testing.T) {
 	if code := apiJSON(t, d, "POST", "/hosts/set", map[string]any{"alias": alias, "exposed": true}, nil); code != 200 {
 		t.Fatalf("expose %s = %d", alias, code)
 	}
-	if !toolListed(t, d, "ssh_hosts") {
-		t.Fatalf("ssh_hosts not listed after exposing %s", alias)
+	if !toolListed(t, d, "ssh_hosts") || !toolListed(t, d, "ssh_shell") {
+		t.Fatalf("gated tools not listed after exposing %s", alias)
 	}
 	view = getHosts(t, d)
 	for _, h := range view.Hosts {
@@ -128,8 +204,8 @@ func TestWebUIHostsHiddenUntilExposed(t *testing.T) {
 	if code := apiJSON(t, d, "POST", "/hosts/set", map[string]any{"alias": alias, "exposed": false}, nil); code != 200 {
 		t.Fatalf("hide %s = %d", alias, code)
 	}
-	if toolListed(t, d, "ssh_hosts") {
-		t.Fatalf("ssh_hosts still listed after the last host was turned off")
+	if toolListed(t, d, "ssh_hosts") || toolListed(t, d, "ssh_shell") {
+		t.Fatalf("gated tools still listed after the last host was turned off")
 	}
 }
 
@@ -139,6 +215,7 @@ func TestWebUIHostsExposurePersists(t *testing.T) {
 	statePath := dir + "/state.json"
 	lockPath := dir + "/daemon.lock"
 	d1 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
+	exchangeToken(t, d1)
 	view := getHosts(t, d1)
 	if len(view.Hosts) < 2 {
 		d1.Stop()
@@ -153,6 +230,7 @@ func TestWebUIHostsExposurePersists(t *testing.T) {
 
 	d2 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
 	defer d2.Stop()
+	exchangeToken(t, d2)
 	if !toolListed(t, d2, "ssh_hosts") {
 		t.Fatalf("ssh_hosts hidden after restart; exposed host was not persisted")
 	}
@@ -173,6 +251,9 @@ func httpBody(t *testing.T, d *Daemon, method, path string) string {
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
+	if d.authCookie != "" {
+		req.Header.Set("Cookie", d.authCookie)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
@@ -188,8 +269,10 @@ func httpBody(t *testing.T, d *Daemon, method, path string) string {
 	return string(b)
 }
 
+// --- tools --------------------------------------------------------------------
+
 func TestWebUIToolToggleRoundTrip(t *testing.T) {
-	d := startGuardDaemon(t)
+	d := startAuthedDaemon(t)
 	var tools []struct {
 		Name    string `json:"name"`
 		Enabled bool   `json:"enabled"`
@@ -199,38 +282,35 @@ func TestWebUIToolToggleRoundTrip(t *testing.T) {
 	}
 	found := false
 	for _, tt := range tools {
-		if tt.Name == "ssh_exec" && tt.Enabled {
+		if tt.Name == "ssh_file_read" && tt.Enabled {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("ssh_exec not listed enabled: %+v", tools)
+		t.Fatalf("ssh_file_read not listed enabled: %+v", tools)
 	}
-	if code := apiJSON(t, d, "POST", "/tools/set", map[string]any{"name": "ssh_exec", "enabled": false}, nil); code != 200 {
+	if code := apiJSON(t, d, "POST", "/tools/set", map[string]any{"name": "ssh_file_read", "enabled": false}, nil); code != 200 {
 		t.Fatalf("POST /api/tools/set disable = %d", code)
 	}
-	if toolListed(t, d, "ssh_exec") {
-		t.Fatalf("ssh_exec still in MCP tools/list after disable")
+	if toolListed(t, d, "ssh_file_read") {
+		t.Fatalf("ssh_file_read still in MCP tools/list after disable")
 	}
-	// A disabled tool must also FAIL when called — not just vanish from the list.
-	if toolCallable(t, d, "ssh_exec") {
-		t.Fatalf("ssh_exec still callable after disable")
+	if toolCallable(t, d, "ssh_file_read") {
+		t.Fatalf("ssh_file_read still callable after disable")
 	}
-	if code := apiJSON(t, d, "POST", "/tools/set", map[string]any{"name": "ssh_exec", "enabled": true}, nil); code != 200 {
+	if code := apiJSON(t, d, "POST", "/tools/set", map[string]any{"name": "ssh_file_read", "enabled": true}, nil); code != 200 {
 		t.Fatalf("POST /api/tools/set enable = %d", code)
 	}
-	if !toolListed(t, d, "ssh_exec") {
-		t.Fatalf("ssh_exec not back in MCP tools/list after re-enable")
+	if !toolListed(t, d, "ssh_file_read") {
+		t.Fatalf("ssh_file_read not back in MCP tools/list after re-enable")
 	}
 }
 
 // TestWebUIToolToggleNotifiesListChanged asserts the daemon emits the
 // tools/list_changed notification when a toggle flips, so MCP clients
-// refresh their view (issue #1 story 27).
+// refresh their view.
 func TestWebUIToolToggleNotifiesListChanged(t *testing.T) {
-	d := startGuardDaemon(t)
-	// The notification only reaches a client that holds the streamable GET
-	// stream open, so this test needs a continuous-listening transport.
+	d := startAuthedDaemon(t)
 	tr, err := transport.NewStreamableHTTP("http://"+d.Addr()+"/mcp", transport.WithContinuousListening())
 	if err != nil {
 		t.Fatalf("transport: %v", err)
@@ -246,7 +326,7 @@ func TestWebUIToolToggleNotifiesListChanged(t *testing.T) {
 	mc.c.OnNotification(func(n mcp.JSONRPCNotification) {
 		got <- n.Method
 	})
-	if code := apiJSON(t, d, "POST", "/tools/set", map[string]any{"name": "ssh_exec", "enabled": false}, nil); code != 200 {
+	if code := apiJSON(t, d, "POST", "/tools/set", map[string]any{"name": "ssh_file_read", "enabled": false}, nil); code != 200 {
 		t.Fatalf("disable: %d", code)
 	}
 	select {
@@ -260,24 +340,21 @@ func TestWebUIToolToggleNotifiesListChanged(t *testing.T) {
 }
 
 // toolCallable reports whether a call to name returns a tool result (vs the
-// "tool not found" JSON-RPC error a disabled/unknown tool produces). We only
-// need reachability, so the error string distinguishes them.
+// "tool not found" JSON-RPC error a disabled/unknown tool produces).
 func toolCallable(t *testing.T, d *Daemon, name string) bool {
 	t.Helper()
 	mc := NewMCPClientForDaemon(t, d)
 	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// Call with a deliberately-bad arg; a live tool returns a *tool* error
-	// (IsError), a missing tool returns the transport-level "not found".
 	res, err := mc.c.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Name: name},
 	})
 	if err != nil {
-		return false // JSON-RPC error: tool not found
+		return false
 	}
 	_ = res
-	return true // got a CallToolResult back (even an IsError one)
+	return true
 }
 
 func toolListed(t *testing.T, d *Daemon, name string) bool {
@@ -304,19 +381,21 @@ func TestWebUIToolTogglePersistsAcrossRestart(t *testing.T) {
 	statePath := dir + "/state.json"
 	lockPath := dir + "/daemon.lock"
 	d1 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
-	if code := apiJSON(t, d1, "POST", "/tools/set", map[string]any{"name": "ssh_exec", "enabled": false}, nil); code != 200 {
+	exchangeToken(t, d1)
+	if code := apiJSON(t, d1, "POST", "/tools/set", map[string]any{"name": "ssh_file_read", "enabled": false}, nil); code != 200 {
 		t.Fatalf("disable: %d", code)
 	}
 	d1.Stop()
 
 	d2 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
 	defer d2.Stop()
-	if toolListed(t, d2, "ssh_exec") {
-		t.Fatalf("ssh_exec re-appeared after restart; disabled state not persisted")
+	exchangeToken(t, d2)
+	if toolListed(t, d2, "ssh_file_read") {
+		t.Fatalf("ssh_file_read re-appeared after restart; disabled state not persisted")
 	}
 }
 
-// --- startup bind safety (issue #1, no sshd needed) -------------------------
+// --- startup bind safety --------------------------------------------------------
 
 func runDaemonExpectExit(t *testing.T, daemonBin string, args ...string) (int, string) {
 	t.Helper()
@@ -350,7 +429,7 @@ func TestNonLoopbackAddrRejected(t *testing.T) {
 
 func TestPortConflictExitsNonZero(t *testing.T) {
 	daemonBin := BuildDaemon(t)
-	d1 := startGuardDaemon(t) // holds its port
+	d1 := startAuthedDaemon(t) // holds its port
 	code, _ := runDaemonExpectExit(t, daemonBin,
 		"-addr", d1.Addr(), "-state", t.TempDir()+"/s.json",
 		"-lock", t.TempDir()+"/l", "-handle", t.TempDir()+"/h")

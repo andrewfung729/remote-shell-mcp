@@ -27,12 +27,18 @@ type Deps struct {
 	Version   string
 	BoundAddr string
 	Log       *slog.Logger
+	// Token is the one-time WebUI token printed at daemon startup; it is
+	// exchanged once for the session cookie. Required — New panics on "".
+	Token string
+
+	auth *auther
 }
 
 // New returns an http.Handler serving the JSON API under /api and the
 // embedded page at /. Mount it on the same mux as the MCP endpoint; the
 // Host/Origin guard is applied by the caller around the whole mux.
 func New(d *Deps) http.Handler {
+	d.auth = newAuther(d.Token)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/status", d.handleStatus)
@@ -48,7 +54,7 @@ func New(d *Deps) http.Handler {
 	// Static page: everything else falls through to the embedded SPA.
 	mux.Handle("/", pageHandler())
 
-	return mux
+	return d.requireAuth(mux)
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -96,8 +102,7 @@ func (d *Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 // --- sessions -------------------------------------------------------------
 
 type shellView struct {
-	ID    string `json:"id"`
-	Age   string `json:"age"`
+	Name  string `json:"name"`
 	Owner string `json:"owner,omitempty"` // MCP client name (clientInfo) or session id
 }
 
@@ -107,8 +112,6 @@ type sessionView struct {
 	User          string      `json:"user"`
 	Addresses     []string    `json:"addresses"`
 	ActiveAddress string      `json:"active_address,omitempty"`
-	Persistent    bool        `json:"persistent"`
-	AutoReconnect bool        `json:"auto_reconnect"`
 	LastError     string      `json:"last_error,omitempty"`
 	Shells        []shellView `json:"shells"`
 }
@@ -121,7 +124,7 @@ func (d *Deps) handleSessions(w http.ResponseWriter, r *http.Request) {
 		shs := s.AllShells()
 		shells := make([]shellView, 0, len(shs))
 		for _, sh := range shs {
-			shells = append(shells, shellView{ID: sh.ID, Age: time.Since(sh.OpenedAt).Round(time.Second).String(), Owner: sh.Owner})
+			shells = append(shells, shellView{Name: sh.Name, Owner: sh.Owner})
 		}
 		out = append(out, sessionView{
 			ID:            info.ID,
@@ -129,8 +132,6 @@ func (d *Deps) handleSessions(w http.ResponseWriter, r *http.Request) {
 			User:          info.User,
 			Addresses:     info.Addresses,
 			ActiveAddress: info.ActiveAddress,
-			Persistent:    info.Persistent,
-			AutoReconnect: info.AutoReconnect,
 			LastError:     info.LastError,
 			Shells:        shells,
 		})
@@ -291,6 +292,6 @@ func (d *Deps) persist() {
 		return
 	}
 	disabled := d.Toggler.DisabledNames()
-	snap := state.Capture(d.SSH, disabled, d.Toggler.ExposedHosts())
+	snap := state.Capture(disabled, d.Toggler.ExposedHosts())
 	_ = d.Store.Save(snap)
 }

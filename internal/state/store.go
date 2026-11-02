@@ -7,21 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
-	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 )
 
+// Snapshot is the whole on-disk state: which hosts are exposed to agents
+// and which tools are off. Sessions are runtime-only — nothing about them
+// is ever written (issue #14), so the file can never hold connection
+// details or credentials.
 type Snapshot struct {
-	Version     int                `json:"version"`
-	SSHSessions []SSHSessionRecord `json:"ssh_sessions,omitempty"`
+	Version int `json:"version"`
 	// DisabledTools is the WebUI's per-tool on/off state, kept in the same
 	// state file (no separate config). Restored on startup so a disabled
 	// tool stays off across daemon restarts.
 	DisabledTools []string `json:"disabled_tools,omitempty"`
-	// HostsExposed is the legacy all-or-nothing opt-in. New state uses
-	// ExposedHosts. A true value with no ExposedHosts list still means
-	// "every configured alias".
-	HostsExposed *bool `json:"hosts_exposed,omitempty"`
 	// ExposedHosts are the Host aliases the user has exposed to agents.
 	// Empty means none. Aliases no longer present in ssh config are dropped
 	// on load.
@@ -29,9 +26,7 @@ type Snapshot struct {
 }
 
 // EffectiveExposedHosts resolves the persisted choice against the aliases
-// currently in ssh config. An explicit ExposedHosts list wins. If that list
-// was never written and the legacy hosts_exposed flag is true, every
-// configured alias is exposed. Otherwise none are.
+// currently in ssh config: keep only exposed aliases that still exist.
 func EffectiveExposedHosts(snap *Snapshot, configured []string) []string {
 	if snap == nil {
 		return nil
@@ -40,26 +35,25 @@ func EffectiveExposedHosts(snap *Snapshot, configured []string) []string {
 	for _, a := range configured {
 		known[a] = true
 	}
-	if snap.ExposedHosts != nil {
-		out := make([]string, 0, len(snap.ExposedHosts))
-		seen := map[string]bool{}
-		for _, a := range snap.ExposedHosts {
-			if known[a] && !seen[a] {
-				seen[a] = true
-				out = append(out, a)
-			}
+	out := make([]string, 0, len(snap.ExposedHosts))
+	seen := map[string]bool{}
+	for _, a := range snap.ExposedHosts {
+		if known[a] && !seen[a] {
+			seen[a] = true
+			out = append(out, a)
 		}
-		return out
 	}
-	if snap.HostsExposed != nil && *snap.HostsExposed {
-		return append([]string{}, configured...)
-	}
-	return nil
+	return out
 }
 
-type SSHSessionRecord struct {
-	ID   string           `json:"id"`
-	Spec sshx.ConnectSpec `json:"spec"`
+// Capture builds the snapshot to persist: exposure list + disabled tools.
+// Sessions are runtime-only and never written (issue #14).
+func Capture(disabled, exposedHosts []string) *Snapshot {
+	snap := &Snapshot{Version: 1, DisabledTools: disabled}
+	if len(exposedHosts) > 0 {
+		snap.ExposedHosts = append([]string{}, exposedHosts...)
+	}
+	return snap
 }
 
 type Store struct {

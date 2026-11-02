@@ -115,7 +115,7 @@ func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 // from their CLI. Returns nil if the file is missing or has no matching
 // entries (caller should leave HostKeyAlgorithms unset → Go's defaults).
 func HostKeyAlgorithmsFor(knownHostsPath, host string) []string {
-	if insecureModeEnabled := host == ""; insecureModeEnabled {
+	if host == "" {
 		return nil
 	}
 	if knownHostsPath == "" {
@@ -180,10 +180,10 @@ func knownHostsHostMatches(pattern, host string) bool {
 	return pattern == host
 }
 
-func HostKeyCallback(insecure bool, knownHostsPath string) (ssh.HostKeyCallback, error) {
-	if insecure {
-		return ssh.InsecureIgnoreHostKey(), nil
-	}
+// HostKeyCallback is always strict against the user's known_hosts —
+// there is no insecure mode (issue #14). A missing file or an unknown key
+// points the human at the fix: ssh to the host once to accept the key.
+func HostKeyCallback(knownHostsPath string) (ssh.HostKeyCallback, error) {
 	if knownHostsPath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -191,10 +191,14 @@ func HostKeyCallback(insecure bool, knownHostsPath string) (ssh.HostKeyCallback,
 		}
 		knownHostsPath = home + "/.ssh/known_hosts"
 	}
-	if _, err := os.Stat(knownHostsPath); err != nil {
-		// Mention that a known_hosts file is missing without echoing the
-		// (possibly home-directory) path back to the MCP client.
-		return nil, fmt.Errorf("known_hosts file is not readable: %w (pass insecure=true to skip host key verification)", err)
+	cb, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("known_hosts: %w (ssh to the host once to accept its key)", err)
 	}
-	return knownhosts.New(knownHostsPath)
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if err := cb(hostname, remote, key); err != nil {
+			return fmt.Errorf("host key verification failed for %s: %w — ssh to the host once to accept its key", hostname, err)
+		}
+		return nil
+	}, nil
 }

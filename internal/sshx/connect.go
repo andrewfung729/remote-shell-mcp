@@ -45,7 +45,7 @@ func dialFinal(spec ConnectSpec) (*ssh.Client, []*ssh.Client, string, error) {
 		return nil, nil, "", err
 	}
 	defer authClosers.Close()
-	hostKey, err := HostKeyCallback(spec.Insecure, spec.KnownHostsPath)
+	hostKey, err := HostKeyCallback(spec.KnownHostsPath)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -69,12 +69,10 @@ func dialFinal(spec ConnectSpec) (*ssh.Client, []*ssh.Client, string, error) {
 			HostKeyCallback: hostKey,
 			Timeout:         timeout,
 		}
-		if !spec.Insecure {
-			host, _, splitErr := net.SplitHostPort(addr)
-			if splitErr == nil {
-				if algos := HostKeyAlgorithmsFor(spec.KnownHostsPath, host); len(algos) > 0 {
-					cfg.HostKeyAlgorithms = algos
-				}
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr == nil {
+			if algos := HostKeyAlgorithmsFor(spec.KnownHostsPath, host); len(algos) > 0 {
+				cfg.HostKeyAlgorithms = algos
 			}
 		}
 		client, err := dialThrough(jumpClients, addr, cfg)
@@ -118,7 +116,7 @@ func dialOneJump(j JumpHost, chain []*ssh.Client) (*ssh.Client, error) {
 		return nil, err
 	}
 	defer closers.Close()
-	hostKey, err := HostKeyCallback(j.Insecure, j.KnownHostsPath)
+	hostKey, err := HostKeyCallback(j.KnownHostsPath)
 	if err != nil {
 		return nil, err
 	}

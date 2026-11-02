@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 )
@@ -18,24 +17,32 @@ func NewManager() *Manager {
 	return &Manager{sessions: map[string]*Session{}}
 }
 
-func (m *Manager) Connect(id string, spec ConnectSpec) (*Session, error) {
-	if id == "" {
-		return nil, errors.New("session id is required")
+// ErrNoSSHConfigEntry is returned when the host alias matches no concrete
+// Host in the daemon user's ~/.ssh/config. Connection details and auth
+// resolve only from ssh_config — a wildcard or missing entry can't be used.
+var ErrNoSSHConfigEntry = errNoSSHConfigEntry
+
+// Connect dials (or returns the existing) session for host. The session id
+// is the host alias itself — one session per host, created transparently
+// on first use. Everything below the alias — connection details and auth —
+// resolves from the daemon user's ~/.ssh/config, like the `ssh` CLI.
+// Keepalive (30s) and auto-reconnect are always on; host-key verification
+// is always strict against ~/.ssh/known_hosts.
+func (m *Manager) Connect(host string) (*Session, error) {
+	if host == "" {
+		return nil, errors.New("host is required")
 	}
-	// Everything below the session id — connection details and auth —
-	// resolves from the daemon user's ~/.ssh/config, like the `ssh` CLI.
-	// Callers can't pass credentials. The first address must match a
-	// concrete Host entry (ConfiguredHosts skips wildcards and Match
-	// blocks); with no entry there is nothing to resolve against, so fail
-	// rather than guess.
-	rawFirst := ""
-	if len(spec.Addresses) > 0 {
-		rawFirst = strings.TrimSpace(spec.Addresses[0])
+	m.mu.RLock()
+	if existing, ok := m.sessions[host]; ok {
+		m.mu.RUnlock()
+		return existing, nil
 	}
-	alias, _ := splitHostPort(rawFirst)
-	if !hasConfigEntry(alias) {
+	m.mu.RUnlock()
+
+	if !hasConfigEntry(host) {
 		return nil, errNoSSHConfigEntry
 	}
+	spec := ConnectSpec{Addresses: []string{host}}
 	resolveFromSSHConfig(&spec)
 	if spec.User == "" {
 		return nil, errors.New("no user: the ssh_config entry doesn't set User (add one to ~/.ssh/config)")
@@ -45,11 +52,12 @@ func (m *Manager) Connect(id string, spec ConnectSpec) (*Session, error) {
 			return nil, errors.New("a jump host has no user: set User in its ssh_config entry")
 		}
 	}
+	id := host
 
 	m.mu.Lock()
-	if _, exists := m.sessions[id]; exists {
+	if existing, exists := m.sessions[id]; exists {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("session %q already exists", id)
+		return existing, nil
 	}
 	sess := &Session{
 		ID:     id,
@@ -78,9 +86,7 @@ func (m *Manager) Connect(id string, spec ConnectSpec) (*Session, error) {
 		return nil, errors.New("session was disconnected during connect")
 	}
 
-	if spec.Keepalive.Std() > 0 || spec.AutoReconnect {
-		sess.startKeepalive()
-	}
+	sess.startKeepalive()
 	return sess, nil
 }
 
@@ -158,6 +164,10 @@ func (m *Manager) CloseAll() {
 	}
 }
 
+// keepaliveInterval is the fixed drop-detection cadence — always on per
+// the connection model (issue #14); not configurable per session.
+const keepaliveInterval = 30 * time.Second
+
 func (s *Session) startKeepalive() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
@@ -168,11 +178,7 @@ func (s *Session) startKeepalive() {
 	}
 	s.keepaliveCancel = cancel
 	s.mu.Unlock()
-	interval := s.Spec.Keepalive.Std()
-	if interval == 0 {
-		interval = 30 * time.Second
-	}
-	go s.runKeepalive(ctx, interval)
+	go s.runKeepalive(ctx, keepaliveInterval)
 }
 
 func (s *Session) runKeepalive(ctx context.Context, interval time.Duration) {
@@ -185,18 +191,12 @@ func (s *Session) runKeepalive(ctx context.Context, interval time.Duration) {
 		case <-t.C:
 			client, err := s.getClient()
 			if err != nil {
-				if s.Spec.AutoReconnect {
-					s.attemptReconnect(ctx)
-				}
+				s.attemptReconnect(ctx)
 				continue
 			}
 			_, _, err = client.SendRequest("keepalive@openssh.com", true, nil)
 			if err != nil {
-				if s.Spec.AutoReconnect {
-					s.attemptReconnect(ctx)
-				} else {
-					s.markState(StateDisconnected, err)
-				}
+				s.attemptReconnect(ctx)
 			}
 		}
 	}
@@ -209,6 +209,9 @@ func (s *Session) attemptReconnect(ctx context.Context) {
 	}
 	defer s.reconnectMu.Unlock()
 
+	// The PTYs died with the old transport — drop every shell so the next
+	// ssh_shell call respawns fresh (and reports shell_restarted).
+	s.closeAllShells()
 	s.clearClient()
 	s.markState(StateReconnecting, nil)
 

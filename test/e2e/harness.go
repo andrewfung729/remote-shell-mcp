@@ -143,9 +143,12 @@ func keyIdentityFile(t *testing.T) string {
 }
 
 // testHome builds a fake $HOME for the daemon: ~/.ssh/config holding one
-// concrete Host entry per alias, plus ~/.ssh/known_hosts (empty is fine —
-// the specs all run insecure=true). Host blocks join with \n because the
-// daemon resolves each connect against the first address's alias.
+// concrete Host entry per alias, plus ~/.ssh/known_hosts seeded with the
+// container's host key — host-key verification is always strict (no
+// insecure mode), so the suite must pre-populate known_hosts the way a
+// human would by ssh'ing once. sshd's public key is fetched from the
+// container over docker exec (the /etc/ssh/*.pub files the image's
+// ssh-keygen -A wrote).
 func testHome(t *testing.T, blocks ...string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -157,6 +160,20 @@ func testHome(t *testing.T, blocks ...string) string {
 		t.Fatalf("write ssh config: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), nil, 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	return dir
+}
+
+// testHomeForContainer is testHome + the container's sshd host key written
+// into known_hosts under "[127.0.0.1]:<port>" — the strict-check fixture.
+func testHomeForContainer(t *testing.T, sshd *SSHDContainer, blocks ...string) string {
+	t.Helper()
+	dir := testHome(t, blocks...)
+	pub := sshd.Exec(t, "cat", "/etc/ssh/ssh_host_ed25519_key.pub")
+	line := fmt.Sprintf("[127.0.0.1]:%d %s", sshd.SSHPort, strings.TrimSpace(pub))
+	kh := filepath.Join(dir, ".ssh", "known_hosts")
+	if err := os.WriteFile(kh, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)
 	}
 	return dir
@@ -293,8 +310,12 @@ type Daemon struct {
 	cmd        *exec.Cmd
 	addr       string
 	handlePath string
+	statePath  string
 	stop       context.CancelFunc
 	stderr     *bytes.Buffer
+	stdout     *bytes.Buffer // captures the printed WebUI token
+	token      string        // one-time WebUI token scraped from stdout
+	authCookie string        // session cookie after a successful exchange
 }
 
 type DaemonOpts struct {
@@ -336,25 +357,43 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 		"-log", "text",
 	)
 	cmd.Env = append(os.Environ(), opts.Env...)
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stderr
+	var stderr, stdout bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
 		t.Fatalf("start daemon: %v", err)
 	}
-	d := &Daemon{cmd: cmd, addr: addr, handlePath: opts.HandlePath, stop: cancel, stderr: &stderr}
+	d := &Daemon{cmd: cmd, addr: addr, handlePath: opts.HandlePath, statePath: opts.StatePath, stop: cancel, stderr: &stderr, stdout: &stdout}
 	if err := waitForHTTP(addr); err != nil {
 		t.Logf("daemon stderr:\n%s", stderr.String())
 		d.Stop()
 		t.Fatalf("daemon never came up: %v", err)
 	}
+	d.token = scrapeToken(stdout.String())
 	return d
 }
 
 func (d *Daemon) HandlePath() string { return d.handlePath }
 
 func (d *Daemon) Addr() string { return d.addr }
+
+// scrapeToken pulls the printed WebUI token out of the daemon's stdout —
+// the token the operator sees in their terminal.
+func scrapeToken(out string) string {
+	for _, line := range strings.FieldsFunc(out, func(r rune) bool { return r == 10 }) {
+		if i := strings.Index(line, "one-time token: "); i >= 0 {
+			return strings.TrimSpace(line[i+len("one-time token: "):])
+		}
+	}
+	return ""
+}
+
+func (d *Daemon) StatePath() string { return d.statePath }
+
+// Token returns the one-time WebUI token scraped from daemon stdout ("" if
+// the daemon printed none — e.g. a pre-token build).
+func (d *Daemon) Token() string { return d.token }
 
 func (d *Daemon) Stop() {
 	if d == nil || d.cmd == nil || d.cmd.Process == nil {

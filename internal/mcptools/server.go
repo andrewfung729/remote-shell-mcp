@@ -86,7 +86,7 @@ func (s *State) PersistNow() error {
 	if s.DisabledTools != nil {
 		disabled = s.DisabledTools()
 	}
-	return s.Store.Save(state.Capture(s.SSH, disabled, s.ExposedHosts()))
+	return s.Store.Save(state.Capture(disabled, s.ExposedHosts()))
 }
 
 // ExposedHosts returns a copy of the aliases the user has exposed to agents.
@@ -155,14 +155,13 @@ func Build(st *State, reg *ClientRegistry, name, version string) *server.MCPServ
 	)
 	RegisterSSH(srv, st)
 	RegisterSSHHosts(srv, st)
-	RegisterSSHShell(srv, st)
 	RegisterSFTP(srv, st)
 	return srv
 }
 
 // serverInstructions is sent to the MCP client in the initialize response.
 // Keep it short — it lands in every agent's context.
-const serverInstructions = `Remote access over SSH through this server's tools. Do NOT shell out to the local ssh/scp/sftp/rsync CLI — use the ssh_* tools here instead (they keep sessions and PTY shells alive across calls). To reach a host: expose it in the WebUI first, get its alias from ssh_hosts, then ssh_connect. ssh_sessions lists already-open connections. For long-running, interactive, or stateful work (cd/env that must persist, vim, tails, deploys) open a persistent shell with ssh_shell_open and run commands in it via ssh_shell_write + ssh_shell_read — do not use ssh_exec for those.`
+const serverInstructions = `Remote access over SSH through this server's tools. Do NOT shell out to the local ssh/scp/sftp/rsync CLI — use the ssh_* tools here instead. Hosts must be exposed in the WebUI first; ssh_hosts lists the exposed aliases. ssh_shell runs commands on a host's persistent shell (cd/env survive between calls) and also drives a running command (poll/input/interrupt) or resets it. ssh_file_* / ssh_upload / ssh_download move files on the same hosts.`
 
 // resultJSON serializes a result for an MCP text-content reply. All tool
 // results are JSON — the alternative output format was removed (issue #1).
@@ -184,10 +183,8 @@ func resultErr(err error) (*mcp.CallToolResult, error) {
 
 // caller returns a stable identifier for the calling MCP client — its
 // clientInfo.name from initialize, falling back to the transport session id
-// for clients that don't send one. Shell handlers use it to scope shells to
-// the client that opened them: each client sees and operates only its own
-// shells on a shared SSH session. Using clientInfo.name (not the session id)
-// keeps ownership stable across a client reconnect or re-handshake.
+// for clients that don't send one. Shells are owned by this identity: each
+// client sees and drives only its own shells on a shared host session.
 func caller(ctx context.Context) string {
 	s := server.ClientSessionFromContext(ctx)
 	if s == nil {
@@ -201,47 +198,18 @@ func caller(ctx context.Context) string {
 	return s.SessionID()
 }
 
-// owner resolves the shell-owner key for a request: an explicit "client"
-// arg when the caller passed one (lets a client name itself stably, e.g. pi
-// self-identifying as "pi"), else the caller's own identity.
-func owner(ctx context.Context, req mcp.CallToolRequest) string {
-	if c := req.GetString("client", ""); c != "" {
-		return c
-	}
-	return caller(ctx)
-}
-
 func bind[T any](req mcp.CallToolRequest, out *T) error {
 	return req.BindArguments(out)
 }
 
-// clampReadTimeout converts a client-supplied milliseconds value into a
-// time.Duration, defending against negative values, huge values that would
-// overflow the multiplication, and "wait forever" requests that would tie up
-// the MCP transport.
-const maxReadTimeout = 5 * 60 * 1000 // 5 minutes
-
-func clampReadTimeout(ms int) int {
-	if ms < 0 {
-		return 0
+// IsExposed reports whether the user has exposed this host alias to agents.
+func (s *State) IsExposed(alias string) bool {
+	s.exposeMu.Lock()
+	defer s.exposeMu.Unlock()
+	for _, a := range s.exposedHosts {
+		if a == alias {
+			return true
+		}
 	}
-	if ms > maxReadTimeout {
-		return maxReadTimeout
-	}
-	return ms
-}
-
-// execContext derives a timeout context for one-shot exec tools. By design
-// there is no "no timeout" option — long-running work belongs in a persistent
-// shell (ssh_shell_open), not in *_exec. Anything <= 0
-// (absent, zero, negative) falls back to the caller-supplied default. Values
-// above 1h are capped to defend against pathological input.
-func execContext(parent context.Context, timeoutMs, defaultMs int) (context.Context, context.CancelFunc) {
-	if timeoutMs <= 0 {
-		timeoutMs = defaultMs
-	}
-	if timeoutMs > 60*60*1000 {
-		timeoutMs = 60 * 60 * 1000
-	}
-	return context.WithTimeout(parent, time.Duration(timeoutMs)*time.Millisecond)
+	return false
 }

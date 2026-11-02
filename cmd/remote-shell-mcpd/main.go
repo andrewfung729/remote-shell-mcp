@@ -125,7 +125,6 @@ func main() {
 		log.Warn("load state", "err", err)
 	} else {
 		snap = s
-		state.Restore(s, sshMgr, log)
 	}
 
 	// Start the debounced state flusher before serving traffic so the first
@@ -160,15 +159,9 @@ func main() {
 		exposed = state.EffectiveExposedHosts(snap, aliases)
 	}
 	st.SetExposedHosts(exposed)
-	// ssh_hosts stays hidden until the user exposes at least one host.
-	// A legacy hosts_exposed=true with no per-host list means all of them.
+	// ssh_hosts and ssh_shell stay hidden until the user exposes a host.
 	toggler.ApplyDisabled(mcptools.WithHostsExposure(disabled, len(exposed) > 0))
 	st.DisabledTools = toggler.DisabledNames
-	if cfgErr == nil && snap != nil && snap.ExposedHosts == nil && snap.HostsExposed != nil && *snap.HostsExposed {
-		if err := st.PersistNow(); err != nil {
-			log.Warn("persist migrated host exposure", "err", err)
-		}
-	}
 
 	streamable := server.NewStreamableHTTPServer(mcpServer,
 		server.WithEndpointPath("/mcp"),
@@ -182,9 +175,14 @@ func main() {
 	// The WebUI serves /api/* and the embedded page at /. Its handlers call
 	// the manager/store/toggler directly — not MCP tools — so no tool toggle
 	// can lock the page out.
+	// The WebUI token is the only credential the daemon mints: one random
+	// value per start, printed once here, exchanged once for the session
+	// cookie. Anyone who can read this stdout can open the WebUI — keep
+	// the daemon's log private (see README's launchd warning).
+	token := webui.GenerateToken()
 	ui := webui.New(&webui.Deps{
 		SSH: sshMgr, Store: store, Toggler: toggler, Clients: clients,
-		Version: version, BoundAddr: boundAddr, Log: log,
+		Version: version, BoundAddr: boundAddr, Log: log, Token: token,
 	})
 	mux.Handle("/api/", ui)
 	mux.Handle("/", ui)
@@ -207,6 +205,10 @@ func main() {
 			"state", store.Path(), "handle", *handlePath)
 		errCh <- httpSrv.Serve(ln)
 	}()
+	// Printed once, on stdout — the operator sees it in the terminal where
+	// they started the daemon. It is NOT in the log line above and NOT in
+	// the handle file; a local agent must not be able to scrape it.
+	fmt.Printf("\nWebUI: http://%s/\n  one-time token: %s\n\n", boundAddr, token)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

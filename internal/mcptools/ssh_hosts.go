@@ -16,7 +16,7 @@ const SSHHostsTool = "ssh_hosts"
 
 func RegisterSSHHosts(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool(SSHHostsTool,
-		mcp.WithDescription("List the SSH host aliases the user has exposed to agents. Each entry is just an alias name — connection details from the daemon user's ssh config are never returned. Hosts the user left off are omitted. The tool itself is hidden until at least one host is exposed. To list already-open connections use ssh_sessions."),
+		mcp.WithDescription("List the SSH host aliases the user has exposed to agents. Each entry is just an alias name — connection details from the daemon user's ssh config are never returned. Hosts the user left off are omitted. The tool itself is hidden until at least one host is exposed. Pass an alias to ssh_shell or the ssh_file_* tools as 'host'."),
 	), handleSSHHosts(st))
 }
 
@@ -56,29 +56,23 @@ func exposedOnly(hosts []sshx.ConfiguredHost, exposed []string) []sshx.Configure
 	return out
 }
 
-// WithHostsExposure shows SSHHostsTool only when anyExposed is true, and
-// strips a stale disabled entry when it is. False is the default: no host
-// has been exposed yet.
+// WithHostsExposure reconciles the persisted disabled list with the
+// exposure state at startup: the gated tools (ssh_hosts, ssh_shell) are
+// visible only when anyExposed is true — stale entries either way are
+// dropped. False is the default: no host has been exposed yet.
 func WithHostsExposure(disabled []string, anyExposed bool) []string {
-	out := make([]string, 0, len(disabled)+1)
+	out := make([]string, 0, len(disabled)+len(exposureGatedTools))
+outer:
 	for _, n := range disabled {
-		if n == SSHHostsTool {
-			continue
+		for _, g := range exposureGatedTools {
+			if n == g {
+				continue outer
+			}
 		}
 		out = append(out, n)
 	}
 	if !anyExposed {
-		out = append(out, SSHHostsTool)
+		out = append(out, exposureGatedTools...)
 	}
 	return out
-}
-
-// HostsExposedFrom reports whether SSHHostsTool is currently visible to agents.
-func HostsExposedFrom(disabled []string) bool {
-	for _, n := range disabled {
-		if n == SSHHostsTool {
-			return false
-		}
-	}
-	return true
 }
