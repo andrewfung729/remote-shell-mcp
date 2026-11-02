@@ -11,25 +11,16 @@ import (
 
 func RegisterSSH(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_connect",
-		mcp.WithDescription("Open a named, long-lived SSH session. Supports multiple addresses (tried in order — e.g. [lan-ip, wan-host]), ProxyJump-style jump hosts, and key/agent auth. Returns the session id and connection state."),
+		mcp.WithDescription("Open a named, long-lived SSH session. The first entry in addresses must be a concrete Host alias in the daemon user's ~/.ssh/config — user, hostname, port, ProxyJump, and auth (IdentityFile/IdentityAgent) all resolve from that entry; callers never supply credentials, and a missing/wildcard-only entry fails. Returns the session id and connection state."),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Identifier for this session. Reuse it in subsequent ssh_* tool calls.")),
 		mcp.WithObject("spec", mcp.Required(),
-			mcp.Description("Connection spec."),
+			mcp.Description("Connection spec. Auth is not part of it — credentials resolve daemon-side from ssh_config."),
 			mcp.Properties(map[string]any{
-				"user":      map[string]any{"type": "string", "description": "Remote login user. Required."},
-				"addresses": map[string]any{"type": "array", "description": "Hosts to try in order, each \"host\" or \"host:port\". Required.", "items": map[string]any{"type": "string"}},
-				"auth": map[string]any{
-					"type":        "object",
-					"description": "Authentication. Provide at least one of: key_path, use_agent. Password and key_passphrase are rejected — they can't be persisted for restore.",
-					"properties": map[string]any{
-						"key_path":     map[string]any{"type": "string", "description": "Path to private key on the daemon host."},
-						"use_agent":    map[string]any{"type": "boolean", "description": "Use ssh-agent for auth. Reads SSH_AUTH_SOCK unless agent_socket is set."},
-						"agent_socket": map[string]any{"type": "string", "description": "Explicit path to an ssh-agent unix socket. Required when SSH_AUTH_SOCK isn't propagated to the daemon (e.g. 1Password agent at ~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock). Supports leading ~/."},
-					},
-				},
+				"user":      map[string]any{"type": "string", "description": "Remote login user. Optional when the ssh_config entry sets User."},
+				"addresses": map[string]any{"type": "array", "description": "Hosts to try in order, each \"host\" or \"host:port\". The first must match a concrete Host in ~/.ssh/config; subsequent entries are explicit fallbacks tried in order. Required.", "items": map[string]any{"type": "string"}},
 				"jump_hosts": map[string]any{
 					"type":        "array",
-					"description": "ProxyJump chain, applied in order. Each entry: {user, addresses, auth?, known_hosts_path?, insecure?}.",
+					"description": "Explicit ProxyJump chain, applied in order. Each entry: {user, addresses, known_hosts_path?, insecure?} — auth resolves from ssh_config per hop. Omitted → the entry's ProxyJump is used.",
 					"items":       map[string]any{"type": "object"},
 				},
 				"insecure":         map[string]any{"type": "boolean", "description": "Skip ~/.ssh/known_hosts host-key verification. Use only for testing."},
@@ -37,8 +28,7 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 				"timeout":          map[string]any{"type": "string", "description": "Per-dial timeout, e.g. \"15s\". Default 15s."},
 				"keepalive":        map[string]any{"type": "string", "description": "SSH keepalive interval, e.g. \"30s\". Enables drop detection. Required for auto_reconnect to fire."},
 				"auto_reconnect":   map[string]any{"type": "boolean", "description": "Re-dial automatically when keepalive notices a drop, with exponential backoff."},
-				"persistent":       map[string]any{"type": "boolean", "description": "Survive daemon restart. Spec is rehydrated on startup; auth must be re-resolvable from disk/agent (key_path or use_agent)."},
-				"forward_agent":    map[string]any{"type": "boolean", "description": "Enable SSH agent forwarding to the remote session."},
+				"persistent":       map[string]any{"type": "boolean", "description": "Survive daemon restart. Spec is rehydrated on startup and re-resolved against ~/.ssh/config — the entry must still resolve on boot."},
 			}),
 		),
 	), handleSSHConnect(st))
@@ -48,8 +38,8 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 		mcp.WithString("id", mcp.Required(), mcp.Description("Session id to close.")),
 	), handleSSHDisconnect(st))
 
-	srv.AddTool(mcp.NewTool("ssh_list",
-		mcp.WithDescription("List all SSH sessions with state, addresses, and shells."),
+	srv.AddTool(mcp.NewTool("ssh_sessions",
+		mcp.WithDescription("List currently open SSH sessions (live connections this daemon is holding). Each entry has the session id, connection state, addresses, and open shells. This does NOT list hosts you can connect to — for those use ssh_hosts. To open a session call ssh_connect."),
 	), handleSSHList(st))
 
 	srv.AddTool(mcp.NewTool("ssh_reconnect",
@@ -58,7 +48,7 @@ func RegisterSSH(srv *server.MCPServer, st *State) {
 	), handleSSHReconnect(st))
 
 	srv.AddTool(mcp.NewTool("ssh_exec",
-		mcp.WithDescription("Run a one-shot command on an SSH session. Each call uses a fresh channel and is bounded by a 30-second timeout — for anything long-running (builds, tails, deploys) open a persistent shell with ssh_shell_open instead, which has no timeout. timeout_ms raises the per-call cap (max 1h)."),
+		mcp.WithDescription("Run a one-shot command on an SSH session. Each call uses a fresh channel and is bounded by a 30-second timeout — for anything long-running (builds, tails, deploys) or stateful (sequences relying on cd/env, interactive programs like vim/top/ssh) open a persistent shell with ssh_shell_open instead and run commands in it via ssh_shell_write + ssh_shell_read. timeout_ms raises the per-call cap (max 1h)."),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session id.")),
 		mcp.WithString("command", mcp.Required(), mcp.Description("Shell command to run.")),
 		mcp.WithObject("env", mcp.Description("Environment variables {KEY: value}. Many servers ignore Setenv unless AcceptEnv is configured.")),

@@ -1,0 +1,7 @@
+# Project MCP client for the local remote-shell-mcpd daemon.
+# Start the daemon with `make run` (default http://127.0.0.1:47180/mcp).
+# Loopback only; no auth token.
+
+[mcp_servers.remote-shell]
+url = "http://127.0.0.1:47180/mcp"
+enabled = true

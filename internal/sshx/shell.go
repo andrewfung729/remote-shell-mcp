@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 type ShellOptions struct {
@@ -19,15 +18,20 @@ type ShellOptions struct {
 	Env        map[string]string `json:"env,omitempty"`
 	Command    string            `json:"command,omitempty"`
 	BufferSize int               `json:"buffer_size,omitempty"`
+	// Owner identifies which client opened this shell — the MCP clientInfo.name
+	// (stable across reconnects), falling back to the transport session id for
+	// unnamed clients, or "" for WebUI. Only a caller with the same owner can
+	// reach the shell; others get "not found".
+	Owner string `json:"owner,omitempty"`
 }
 
 type Shell struct {
 	ID        string
 	SessionID string
+	Owner     string // clientInfo.name / session id; empty = opened via WebUI
 
 	parent  *Session // back-ref so the shell can deregister itself when the remote process exits
 	session *ssh.Session
-
 	writeMu sync.Mutex // serializes concurrent Write callers
 	stdin   io.WriteCloser
 
@@ -46,6 +50,7 @@ type Shell struct {
 type ShellInfo struct {
 	ID         string    `json:"id"`
 	SessionID  string    `json:"session_id"`
+	Owner      string    `json:"owner,omitempty"`
 	OpenedAt   time.Time `json:"opened_at"`
 	BufferSize int       `json:"buffered_bytes"`
 	Closed     bool      `json:"closed"`
@@ -58,6 +63,7 @@ func (s *Shell) Info() ShellInfo {
 	return ShellInfo{
 		ID:         s.ID,
 		SessionID:  s.SessionID,
+		Owner:      s.Owner,
 		OpenedAt:   s.OpenedAt,
 		BufferSize: size,
 		Closed:     s.closed.Load(),
@@ -174,12 +180,6 @@ func (sess *Session) OpenShell(shellID string, opts ShellOptions) (*Shell, error
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
-	sess.mu.RLock()
-	fwd := sess.agentForwardOn
-	sess.mu.RUnlock()
-	if fwd {
-		_ = agent.RequestAgentForwarding(chSess)
-	}
 	if err := chSess.RequestPty(term, rows, cols, modes); err != nil {
 		_ = chSess.Close()
 		return nil, fmt.Errorf("request pty: %w", err)
@@ -216,7 +216,7 @@ func (sess *Session) OpenShell(shellID string, opts ShellOptions) (*Shell, error
 		bufSize = 1024 * 1024
 	}
 	sh := &Shell{
-		ID: shellID, SessionID: sess.ID,
+		ID: shellID, SessionID: sess.ID, Owner: opts.Owner,
 		parent:   sess,
 		session:  chSess,
 		stdin:    stdin,
@@ -280,20 +280,20 @@ func (sh *Shell) pumpReader(r io.Reader) {
 	}
 }
 
-func (sess *Session) GetShell(shellID string) (*Shell, error) {
+func (sess *Session) GetShell(shellID, owner string) (*Shell, error) {
 	sess.shellsMu.Lock()
 	defer sess.shellsMu.Unlock()
 	sh, ok := sess.shells[shellID]
-	if !ok {
+	if !ok || sh.Owner != owner {
 		return nil, fmt.Errorf("shell %q not found on session %q", shellID, sess.ID)
 	}
 	return sh, nil
 }
 
-func (sess *Session) CloseShell(shellID string) error {
+func (sess *Session) CloseShell(shellID, owner string) error {
 	sess.shellsMu.Lock()
 	sh, ok := sess.shells[shellID]
-	if !ok {
+	if !ok || sh.Owner != owner {
 		sess.shellsMu.Unlock()
 		return fmt.Errorf("shell %q not found on session %q", shellID, sess.ID)
 	}
@@ -302,7 +302,24 @@ func (sess *Session) CloseShell(shellID string) error {
 	return sh.Close()
 }
 
-func (sess *Session) ListShells() []ShellInfo {
+// ListShells returns the shells whose Owner matches `owner`. MCP clients
+// pass their transport session id and see only their own shells.
+func (sess *Session) ListShells(owner string) []ShellInfo {
+	sess.shellsMu.Lock()
+	defer sess.shellsMu.Unlock()
+	out := make([]ShellInfo, 0, len(sess.shells))
+	for _, sh := range sess.shells {
+		if sh.Owner != owner {
+			continue
+		}
+		out = append(out, sh.Info())
+	}
+	return out
+}
+
+// AllShells returns every shell regardless of owner — for the WebUI, which
+// shows the operator all shells across all clients.
+func (sess *Session) AllShells() []ShellInfo {
 	sess.shellsMu.Lock()
 	defer sess.shellsMu.Unlock()
 	out := make([]ShellInfo, 0, len(sess.shells))

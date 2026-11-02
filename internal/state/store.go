@@ -18,6 +18,43 @@ type Snapshot struct {
 	// state file (no separate config). Restored on startup so a disabled
 	// tool stays off across daemon restarts.
 	DisabledTools []string `json:"disabled_tools,omitempty"`
+	// HostsExposed is the legacy all-or-nothing opt-in. New state uses
+	// ExposedHosts. A true value with no ExposedHosts list still means
+	// "every configured alias".
+	HostsExposed *bool `json:"hosts_exposed,omitempty"`
+	// ExposedHosts are the Host aliases the user has exposed to agents.
+	// Empty means none. Aliases no longer present in ssh config are dropped
+	// on load.
+	ExposedHosts []string `json:"exposed_hosts,omitempty"`
+}
+
+// EffectiveExposedHosts resolves the persisted choice against the aliases
+// currently in ssh config. An explicit ExposedHosts list wins. If that list
+// was never written and the legacy hosts_exposed flag is true, every
+// configured alias is exposed. Otherwise none are.
+func EffectiveExposedHosts(snap *Snapshot, configured []string) []string {
+	if snap == nil {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, a := range configured {
+		known[a] = true
+	}
+	if snap.ExposedHosts != nil {
+		out := make([]string, 0, len(snap.ExposedHosts))
+		seen := map[string]bool{}
+		for _, a := range snap.ExposedHosts {
+			if known[a] && !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+	if snap.HostsExposed != nil && *snap.HostsExposed {
+		return append([]string{}, configured...)
+	}
+	return nil
 }
 
 type SSHSessionRecord struct {

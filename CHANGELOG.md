@@ -4,6 +4,12 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
 
 ## Unreleased
 
+- **MCP server instructions.** The initialize response now carries a short instruction: use the `ssh_*` tools here, not the local `ssh`/`scp`/`sftp`/`rsync` CLI; hosts must be exposed in the WebUI before `ssh_hosts` will name them.
+
+- **`ssh_hosts` returns alias names only.** It no longer leaks user, hostname, port, or ProxyJump to the agent — the daemon resolves those internally. An exposed host is exactly an opaque name the agent can hand back to `ssh_connect`.
+- **Renamed `ssh_list` → `ssh_sessions`.** The tool lists live connections held by the daemon, not hosts you can dial — the old name kept being misread as "list of SSH hosts". `ssh_hosts` (unchanged name) is the one that lists connectable `Host` aliases. Both tools' descriptions now cross-reference each other so the distinction is visible from `tools/list` alone.
+
+- **SSH host list.** The WebUI shows concrete `Host` aliases from the daemon user's `~/.ssh/config`, each with its own switch. `ssh_hosts` returns only the hosts the user turned on, and stays hidden until at least one is on. Wildcard and `Match` blocks are omitted, and key paths are not returned.
 - **Refocused the product on "remote host as local MCP tools"** (issue #1;
   ADR-0004 local-only daemon + WebUI, ADR-0005 product-scope rule). See the
   sub-bullets below.

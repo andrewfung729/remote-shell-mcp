@@ -6,8 +6,11 @@ import (
 	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 )
 
-func Capture(ssh *sshx.Manager, disabled []string) *Snapshot {
+func Capture(ssh *sshx.Manager, disabled, exposedHosts []string) *Snapshot {
 	snap := &Snapshot{Version: 1, DisabledTools: disabled}
+	if len(exposedHosts) > 0 {
+		snap.ExposedHosts = append([]string{}, exposedHosts...)
+	}
 
 	for _, s := range ssh.Sessions() {
 		if !s.Spec.Persistent {

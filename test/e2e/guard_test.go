@@ -56,7 +56,7 @@ func TestGuardRejectsForeignOrigin(t *testing.T) {
 	if code := httpReq(t, d, "POST", "/mcp", "", "https://evil.example", "text/plain", "{}"); code != http.StatusForbidden {
 		t.Fatalf("hostile-Origin POST /mcp = %d, want 403", code)
 	}
-	if code := httpReq(t, d, "POST", "/api/sessions/connect", "", "https://evil.example", "text/plain", "{}"); code != http.StatusForbidden {
+	if code := httpReq(t, d, "POST", "/api/sessions/reconnect", "", "https://evil.example", "text/plain", "{}"); code != http.StatusForbidden {
 		t.Fatalf("hostile-Origin POST /api = %d, want 403", code)
 	}
 	if code := httpReq(t, d, "GET", "/", "", "https://evil.example", "", ""); code != http.StatusForbidden {

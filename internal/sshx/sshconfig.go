@@ -1,6 +1,7 @@
 package sshx
 
 import (
+	"errors"
 	"net"
 	"os"
 	"strconv"
@@ -9,24 +10,27 @@ import (
 	"github.com/kevinburke/ssh_config"
 )
 
+// errNoSSHConfigEntry is returned by Connect when the first address matches
+// no concrete Host in the daemon user's ~/.ssh/config. Callers can't supply
+// credentials themselves, so there is nothing to fall back to — fix the
+// config (or expose the host via the WebUI).
+var errNoSSHConfigEntry = errors.New("no matching Host in ~/.ssh/config: connection details and auth resolve only from ssh_config, and a wildcard or missing entry can't be used")
+
 // resolveFromSSHConfig fills in missing fields on a ConnectSpec from the
-// user's ~/.ssh/config, the same way the `ssh` CLI does. Anything the caller
-// set explicitly is preserved; only empty fields are filled. Set
-// spec.DisableSSHConfig to skip entirely (useful for tests or fully-explicit
-// automation).
+// user's ~/.ssh/config, the same way the `ssh` CLI does. It is also the
+// *only* source of auth — callers cannot pass credentials. Anything the
+// caller set explicitly (user, addresses, jump_hosts) is preserved; only
+// empty fields are filled.
 //
 // Mapping from OpenSSH option → ConnectSpec field:
 //
 //	Hostname        → addresses[i] (alias replaced with the real host:port)
 //	Port            → addresses[i] (only when no explicit port was given)
 //	User            → spec.User
-//	IdentityFile    → spec.Auth.KeyPath  (only if no other auth is set)
+//	IdentityFile    → spec.Auth.KeyPath
 //	IdentityAgent   → spec.Auth.UseAgent + spec.Auth.AgentSocket
 //	ProxyJump       → spec.JumpHosts (chained)
 func resolveFromSSHConfig(spec *ConnectSpec) {
-	if spec.DisableSSHConfig {
-		return
-	}
 	if len(spec.Addresses) == 0 {
 		return
 	}
@@ -65,15 +69,13 @@ func resolveFromSSHConfig(spec *ConnectSpec) {
 		}
 	}
 
-	// Auth: only fill if no auth method is explicit. Otherwise the caller's
-	// explicit choice wins entirely.
-	if spec.Auth.KeyPath == "" && !spec.Auth.UseAgent {
-		if ag := nonEmpty(ssh_config.Get(alias, "IdentityAgent")); ag != "" {
-			spec.Auth.UseAgent = true
-			spec.Auth.AgentSocket = expandHome(ag)
-		} else if id := nonEmpty(ssh_config.Get(alias, "IdentityFile")); id != "" {
-			spec.Auth.KeyPath = expandHome(id)
-		}
+	// Auth always comes from ssh_config (IdentityAgent preferred, then
+	// IdentityFile); the caller can't pick credentials.
+	if ag := nonEmpty(ssh_config.Get(alias, "IdentityAgent")); ag != "" {
+		spec.Auth.UseAgent = true
+		spec.Auth.AgentSocket = expandHome(ag)
+	} else if id := nonEmpty(ssh_config.Get(alias, "IdentityFile")); id != "" {
+		spec.Auth.KeyPath = expandHome(id)
 	}
 
 	// ProxyJump: only fill if no jump chain is explicit.

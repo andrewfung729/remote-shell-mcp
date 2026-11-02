@@ -11,6 +11,8 @@ embedded WebUI (ADR-0004). Package map: README.md "Project layout".
 
 ## Commands
 
+- Build binary: `make` (writes `bin/remote-shell-mcpd`, stamps `main.version`)
+- Run: `make run` (builds, then starts the daemon)
 - Build: `go build ./...`
 - Lint: `go vet ./...`
 - Unit tests: `go test -race -count=1 ./...` (same as CI)

@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "remote-shell": {
+      "url": "http://127.0.0.1:47180/mcp",
+      "description": "Persistent SSH, PTY shells, and SFTP via the local remote-shell-mcpd daemon"
+    },
+    "chrome-devtools": {
+      "command": "pnpm",
+      "args": [
+        "dlx",
+        "chrome-devtools-mcp@1.9.0",
+        "--browser-url=http://127.0.0.1:9222",
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ],
+      "env": {
+        "CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS": "1",
+        "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1"
+      }
+    }
+  }
+}

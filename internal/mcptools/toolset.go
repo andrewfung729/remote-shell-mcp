@@ -70,6 +70,61 @@ func (t *ToolToggler) Set(name string, enabled bool) bool {
 	return true
 }
 
+// ExposedHosts returns the aliases the user has exposed to agents.
+func (t *ToolToggler) ExposedHosts() []string {
+	return t.st.ExposedHosts()
+}
+
+// SetExposedHost turns one configured alias on or off for agents, then shows
+// or hides ssh_hosts to match. The host list is persisted either way.
+func (t *ToolToggler) SetExposedHost(alias string, on bool) {
+	cur := t.st.ExposedHosts()
+	next := make([]string, 0, len(cur)+1)
+	seen := false
+	for _, a := range cur {
+		if a == alias {
+			seen = true
+			if on {
+				next = append(next, a)
+			}
+			continue
+		}
+		next = append(next, a)
+	}
+	if on && !seen {
+		next = append(next, alias)
+	}
+	t.st.SetExposedHosts(next)
+	t.alignSSHHostsTool()
+}
+
+// ClearExposedHosts turns every host off and hides ssh_hosts.
+func (t *ToolToggler) ClearExposedHosts() {
+	t.st.SetExposedHosts(nil)
+	t.alignSSHHostsTool()
+}
+
+// alignSSHHostsTool makes the ssh_hosts tool visible exactly when at least
+// one host is exposed.
+func (t *ToolToggler) alignSSHHostsTool() {
+	on := len(t.st.ExposedHosts()) > 0
+	if t.Enabled(SSHHostsTool) == on {
+		_ = t.st.Persist()
+		return
+	}
+	t.Set(SSHHostsTool, on)
+}
+
+// Enabled reports whether name is registered and currently visible to MCP clients.
+func (t *ToolToggler) Enabled(name string) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if _, ok := t.stash[name]; !ok {
+		return false
+	}
+	return !t.disabled[name]
+}
+
 // DisabledNames returns the list of disabled tool names (for persistence).
 func (t *ToolToggler) DisabledNames() []string {
 	t.mu.RLock()

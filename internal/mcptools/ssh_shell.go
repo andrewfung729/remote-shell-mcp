@@ -13,7 +13,7 @@ import (
 
 func RegisterSSHShell(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_shell_open",
-		mcp.WithDescription("Open a persistent PTY shell on an SSH session. State (cd, env, vim) survives between calls until ssh_shell_close."),
+		mcp.WithDescription("Open a long-lived PTY shell on an SSH session. Run commands in it via ssh_shell_write (with a trailing \\n) and collect output with ssh_shell_read. State (cd, env, vim) survives between calls until ssh_shell_close. Does NOT survive a daemon restart — the remote shell process dies with the connection; only the session is re-dialed."),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Parent SSH session id.")),
 		mcp.WithString("shell_id", mcp.Required(), mcp.Description("Identifier for this shell.")),
 		mcp.WithString("term", mcp.Description("TERM value (default: xterm-256color).")),
@@ -21,20 +21,23 @@ func RegisterSSHShell(srv *server.MCPServer, st *State) {
 		mcp.WithNumber("cols", mcp.Description("PTY cols (default 80).")),
 		mcp.WithString("command", mcp.Description("Command to run instead of an interactive login shell.")),
 		mcp.WithObject("env", mcp.Description("Environment variables.")),
+		mcp.WithString("client", mcp.Description("Optional stable name for the owning client (e.g. \"pi\", \"claude-code\"). Scopes the shell so only callers passing the same client can reach it; defaults to the MCP clientInfo.name or transport session id.")),
 	), handleShellOpen(st))
 
 	srv.AddTool(mcp.NewTool("ssh_shell_write",
-		mcp.WithDescription("Write data to a shell's stdin. Include trailing \\n to send a line."),
+		mcp.WithDescription("Send input to a persistent shell — this is how you run commands in it. Include a trailing \\n to execute a line, then call ssh_shell_read for the output."),
 		mcp.WithString("session_id", mcp.Required()),
 		mcp.WithString("shell_id", mcp.Required()),
 		mcp.WithString("data", mcp.Required(), mcp.Description("Bytes to send to the shell stdin.")),
+		mcp.WithString("client", mcp.Description("Client name owning the shell (same value passed to ssh_shell_open). Defaults to caller identity.")),
 	), handleShellWrite(st))
 
 	srv.AddTool(mcp.NewTool("ssh_shell_read",
-		mcp.WithDescription("Read buffered output from a shell. Returns immediately if data is buffered; otherwise waits up to timeout_ms for new output."),
+		mcp.WithDescription("Read output produced by commands sent via ssh_shell_write. Returns immediately if data is buffered; otherwise waits up to timeout_ms for new output."),
 		mcp.WithString("session_id", mcp.Required()),
 		mcp.WithString("shell_id", mcp.Required()),
 		mcp.WithNumber("timeout_ms", mcp.Description("How long to wait for new output if buffer is empty. Default 1000.")),
+		mcp.WithString("client", mcp.Description("Client name owning the shell. Defaults to caller identity.")),
 	), handleShellRead(st))
 
 	srv.AddTool(mcp.NewTool("ssh_shell_resize",
@@ -43,17 +46,20 @@ func RegisterSSHShell(srv *server.MCPServer, st *State) {
 		mcp.WithString("shell_id", mcp.Required()),
 		mcp.WithNumber("rows", mcp.Required()),
 		mcp.WithNumber("cols", mcp.Required()),
+		mcp.WithString("client", mcp.Description("Client name owning the shell. Defaults to caller identity.")),
 	), handleShellResize(st))
 
 	srv.AddTool(mcp.NewTool("ssh_shell_close",
 		mcp.WithDescription("Close a persistent shell."),
 		mcp.WithString("session_id", mcp.Required()),
 		mcp.WithString("shell_id", mcp.Required()),
+		mcp.WithString("client", mcp.Description("Client name owning the shell. Defaults to caller identity.")),
 	), handleShellClose(st))
 
 	srv.AddTool(mcp.NewTool("ssh_shell_list",
-		mcp.WithDescription("List shells on a session, or across all sessions if session_id is omitted."),
+		mcp.WithDescription("List shells on a session, or across all sessions if session_id is omitted. Returns only shells owned by the calling client."),
 		mcp.WithString("session_id", mcp.Description("Optional session id.")),
+		mcp.WithString("client", mcp.Description("Client name to list for. Defaults to caller identity.")),
 	), handleShellList(st))
 }
 
@@ -65,6 +71,7 @@ type shellOpenArgs struct {
 	Cols      int               `json:"cols,omitempty"`
 	Command   string            `json:"command,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+	Client    string            `json:"client,omitempty"`
 }
 
 func handleShellOpen(st *State) server.ToolHandlerFunc {
@@ -80,6 +87,7 @@ func handleShellOpen(st *State) server.ToolHandlerFunc {
 		sh, err := s.OpenShell(args.ShellID, sshx.ShellOptions{
 			Term: args.Term, Rows: args.Rows, Cols: args.Cols,
 			Command: args.Command, Env: args.Env,
+			Owner: owner(ctx, req),
 		})
 		if err != nil {
 			return resultErr(err)
@@ -106,7 +114,7 @@ func handleShellWrite(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		sh, err := s.GetShell(shid)
+		sh, err := s.GetShell(shid, owner(ctx, req))
 		if err != nil {
 			return resultErr(err)
 		}
@@ -133,7 +141,7 @@ func handleShellRead(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		sh, err := s.GetShell(shid)
+		sh, err := s.GetShell(shid, owner(ctx, req))
 		if err != nil {
 			return resultErr(err)
 		}
@@ -170,7 +178,7 @@ func handleShellResize(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		sh, err := s.GetShell(shid)
+		sh, err := s.GetShell(shid, owner(ctx, req))
 		if err != nil {
 			return resultErr(err)
 		}
@@ -195,7 +203,7 @@ func handleShellClose(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		if err := s.CloseShell(shid); err != nil {
+		if err := s.CloseShell(shid, owner(ctx, req)); err != nil {
 			return resultErr(err)
 		}
 		return mcp.NewToolResultText("closed " + shid), nil
@@ -208,7 +216,7 @@ func handleShellList(st *State) server.ToolHandlerFunc {
 		if sid == "" {
 			var all []sshx.ShellInfo
 			for _, s := range st.SSH.Sessions() {
-				all = append(all, s.ListShells()...)
+				all = append(all, s.ListShells(owner(ctx, req))...)
 			}
 			return st.resultJSON(all)
 		}
@@ -216,6 +224,6 @@ func handleShellList(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		return st.resultJSON(s.ListShells())
+		return st.resultJSON(s.ListShells(owner(ctx, req)))
 	}
 }

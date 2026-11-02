@@ -38,8 +38,10 @@ configuration and monitoring.
   deleted.
 - **`/api` + embedded page.** A `webui` package serves a JSON API and a
   plain HTML/vanilla-JS page (embedded, no build step) for monitoring and
-  configuration: daemon status, live sessions (connect/disconnect/reconnect,
-  read-only shell list), and per-tool on/off switches. Its handlers call the
+  configuration: daemon status, live sessions (disconnect/reconnect,
+  read-only shell list), and per-tool on/off switches. Sessions are
+  created by agents via `ssh_connect` — the page has no manual-connect
+  form and the API no connect route. Its handlers call the
   SSH manager / state store / tool toggler directly — never MCP tools — so
   disabling a tool can't lock the page out. Command execution, file
   browsing, and terminal stay MCP-only.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,14 +22,27 @@ func (m *Manager) Connect(id string, spec ConnectSpec) (*Session, error) {
 	if id == "" {
 		return nil, errors.New("session id is required")
 	}
-	// Fill blanks from ~/.ssh/config (like the `ssh` CLI). Explicit fields
-	// always win — see resolveFromSSHConfig.
+	// Everything below the session id — connection details and auth —
+	// resolves from the daemon user's ~/.ssh/config, like the `ssh` CLI.
+	// Callers can't pass credentials. The first address must match a
+	// concrete Host entry (ConfiguredHosts skips wildcards and Match
+	// blocks); with no entry there is nothing to resolve against, so fail
+	// rather than guess.
+	rawFirst := ""
+	if len(spec.Addresses) > 0 {
+		rawFirst = strings.TrimSpace(spec.Addresses[0])
+	}
+	alias, _ := splitHostPort(rawFirst)
+	if !hasConfigEntry(alias) {
+		return nil, errNoSSHConfigEntry
+	}
 	resolveFromSSHConfig(&spec)
 	if spec.User == "" {
-		if u := os.Getenv("USER"); u != "" {
-			spec.User = u
-		} else {
-			return nil, errors.New("user is required (not in spec, not in ssh_config, not in $USER)")
+		return nil, errors.New("no user: the ssh_config entry doesn't set User (add one to ~/.ssh/config)")
+	}
+	for _, j := range spec.JumpHosts {
+		if j.User == "" {
+			return nil, errors.New("a jump host has no user: set User in its ssh_config entry")
 		}
 	}
 
@@ -65,15 +78,6 @@ func (m *Manager) Connect(id string, spec ConnectSpec) (*Session, error) {
 		return nil, errors.New("session was disconnected during connect")
 	}
 
-	if spec.ForwardAgent {
-		// Use the same agent the auth path used (or $SSH_AUTH_SOCK if the
-		// resolver didn't set one). Best-effort: a failure to wire up
-		// forwarding shouldn't kill the session; the error surfaces in
-		// the session's lastError via markState if the caller cares.
-		if err := sess.enableAgentForwarding(spec.Auth.AgentSocket); err != nil {
-			sess.markState(StateConnected, fmt.Errorf("agent forwarding: %w", err))
-		}
-	}
 	if spec.Keepalive.Std() > 0 || spec.AutoReconnect {
 		sess.startKeepalive()
 	}

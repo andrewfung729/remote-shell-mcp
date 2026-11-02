@@ -135,15 +135,40 @@ func main() {
 	// captures empty state and clobbers everything that was just saved).
 	st.Start()
 
-	mcpServer := mcptools.Build(st, serverName, version)
+	clients := mcptools.NewClientRegistry()
+	mcpServer := mcptools.Build(st, clients, serverName, version)
 
 	// Tool toggling: the WebUI flips MCP tools on/off without a restart.
 	// Apply the persisted disabled set, then feed future flushes the live set.
 	toggler := mcptools.NewToolToggler(mcpServer, st)
+	var disabled []string
 	if snap != nil {
-		toggler.ApplyDisabled(snap.DisabledTools)
+		disabled = snap.DisabledTools
 	}
+	configured, cfgErr := sshx.ConfiguredHosts("")
+	if cfgErr != nil {
+		log.Warn("read ssh config", "err", cfgErr)
+	}
+	aliases := make([]string, 0, len(configured))
+	for _, h := range configured {
+		aliases = append(aliases, h.Alias)
+	}
+	var exposed []string
+	if cfgErr != nil && snap != nil {
+		exposed = append([]string{}, snap.ExposedHosts...)
+	} else {
+		exposed = state.EffectiveExposedHosts(snap, aliases)
+	}
+	st.SetExposedHosts(exposed)
+	// ssh_hosts stays hidden until the user exposes at least one host.
+	// A legacy hosts_exposed=true with no per-host list means all of them.
+	toggler.ApplyDisabled(mcptools.WithHostsExposure(disabled, len(exposed) > 0))
 	st.DisabledTools = toggler.DisabledNames
+	if cfgErr == nil && snap != nil && snap.ExposedHosts == nil && snap.HostsExposed != nil && *snap.HostsExposed {
+		if err := st.PersistNow(); err != nil {
+			log.Warn("persist migrated host exposure", "err", err)
+		}
+	}
 
 	streamable := server.NewStreamableHTTPServer(mcpServer,
 		server.WithEndpointPath("/mcp"),
@@ -158,7 +183,7 @@ func main() {
 	// the manager/store/toggler directly — not MCP tools — so no tool toggle
 	// can lock the page out.
 	ui := webui.New(&webui.Deps{
-		SSH: sshMgr, Store: store, Toggler: toggler,
+		SSH: sshMgr, Store: store, Toggler: toggler, Clients: clients,
 		Version: version, BoundAddr: boundAddr, Log: log,
 	})
 	mux.Handle("/api/", ui)

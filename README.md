@@ -32,8 +32,8 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 
 | Area | What |
 |-|-|
-| **SSH** | named long-lived sessions, multi-address try-in-order, ProxyJump-style jump hosts, `ssh-agent`/key auth only (password and key passphrase are rejected — they can't be persisted for restore), keepalive + auto-reconnect with backoff, persistent across daemon restart |
-| **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls, write/read/resize/close, parallel-safe writes |
+| **SSH** | named long-lived sessions. `addresses[0]` must be a concrete `Host` alias in the daemon user's `~/.ssh/config` — user, hostname, port, ProxyJump chain, and auth (IdentityFile/IdentityAgent) all resolve from that entry; callers never supply credentials, and a missing or wildcard-only entry fails. keepalive + auto-reconnect with backoff, persistent across daemon restart |
+| **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls and client restarts, write/read/resize/close, parallel-safe writes. Long-lived, not persistent — a daemon restart kills them (the remote bash dies with the connection). For state that outlives the daemon, run `tmux`/`screen` inside the shell. Shells are scoped to the MCP client that opened them: a second client on a shared session sees `shell not found`, while the WebUI sees all shells.
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
 | **Persistence** | session specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
 | **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. No auth token — the loopback guard (Host/Origin check) is the boundary. |
@@ -46,9 +46,10 @@ There is one binary: `remote-shell-mcpd`. Build it from source (macOS / Linux, a
 
 ```
 git clone https://github.com/andrewfung729/remote-shell-mcp && cd remote-shell-mcp
-go build -o bin/remote-shell-mcpd ./cmd/remote-shell-mcpd
-./bin/remote-shell-mcpd
+make run
 ```
+
+`make` writes `bin/remote-shell-mcpd` with `CGO_ENABLED=0` and stamps `main.version` from `git describe` (same `-X main.version` injection as `.goreleaser.yaml`). `make run` builds that binary and starts it.
 
 ```
 # Or via Go (module path kept from upstream):
@@ -71,7 +72,7 @@ login item) and point every client at.
 
 | Approach | Sessions | PTY shell state | SFTP | ssh_config / 1Password / agent forwarding |
 |-|-|-|-|-|
-| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: resolves `~/.ssh/config`, uses `IdentityAgent` (1Password / gpg-agent), `ForwardAgent` works |
+| `remote-shell-mcp` | Long-lived, daemon outlives the client; auto-reconnect with backoff | Survives across MCP calls (`cd`, env, `vim`, `tail -f`) | Full: read / write / chmod / mkdir / rename / upload / download | Yes: `~/.ssh/config` is the *only* source of connection details and auth — IdentityAgent (1Password / gpg-agent) supported |
 | Stdio MCPs that wrap `ssh` per call | Re-dialed for every tool call; nothing survives | None (no persistent shell) | Usually missing | Usually missing |
 | Running `ssh` from a generic Bash MCP | Re-dialed per call | None | Via shelling out to `scp`/`rsync` | Manual |
 | `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a |
@@ -84,7 +85,7 @@ A stdio MCP server lives and dies with each client connection. That's fine for s
 
 - An `ssh_shell` you `cd /var/log`'d into is still there when the client reconnects.
 - An `auto_reconnect: true` session that lost its TCP transport at 2am is back by 2:05am.
-- A `persistent: true` session written to disk is back after `kill -9 daemon`.
+- A `persistent: true` session written to disk is back after `kill -9 daemon` — but its shells are not. The PTYs were remote processes; they died with the connection and the daemon only re-dials the session.
 
 ## Configuration
 
@@ -118,14 +119,27 @@ to open the configuration/monitoring page. It shows:
 
 - **Status** — uptime, version, listen address, state-file path.
 - **Sessions** — every live session with state, user@addr, flags
-  (persistent / auto_reconnect / forward_agent), last error, and a read-only
-  list of its open shells (id + age). Connect a new session, or disconnect /
-  reconnect an existing one. Editing a session = disconnect + reconnect with
-  a new spec.
+  (persistent / auto_reconnect), last error, and a read-only
+  list of its open shells (id + age + which client owns it). Sessions are
+  created by agents via `ssh_connect`; the page offers disconnect /
+  reconnect only.
+- **MCP Clients** — every connected MCP client (name + version from the
+  `initialize` handshake, transport session id, connect time).
+- **SSH hosts** — concrete `Host` aliases from the daemon user's
+  `~/.ssh/config` (alias, user, hostname, port, ProxyJump). Wildcard
+  patterns and `Match` blocks are omitted, and key paths are not shown.
+  The page always lists them. Each host has its own switch: on exposes
+  that alias to agents through `ssh_hosts`, which returns only the
+  exposed alias names — never user, hostname, port, or other config
+  details. The tool stays hidden until at least one host is exposed.
+  The choice persists across restarts.
 - **MCP tools** — every tool with an on/off switch, grouped by name prefix.
+  The group switch turns every tool in that group on or off at once
+  (mixed groups show indeterminate; clicking it turns them all on).
   Disabling a tool removes it from the MCP `tools/list` and makes calls
   fail; re-enabling restores it instantly (clients get a
   `tools/list_changed` notification). The choice persists across restarts.
+  `ssh_hosts` starts disabled and turns on only while at least one host is exposed.
 
 The page is plain HTML + vanilla JS embedded in the binary — no Node, no
 bundler, no build step; `go build` is the only build. It deliberately has
@@ -144,8 +158,9 @@ The suite (30+ tests, race-clean) drives the daemon through the spec
 Streamable HTTP `/mcp` endpoint using the mcp-go client (same path a real
 MCP client takes) and exercises:
 
-- Auth: ephemeral key file (suite fixture + per-test keypairs), ssh-agent
-- SSH: exec, persistent PTY shell with state preservation, jump hosts, multi-address fallback, auto-reconnect after sshd kill, persistence across full daemon restart
+- Auth: ephemeral key file via `IdentityFile` in a generated ssh_config
+  (suite fixture + per-test keypairs), ssh-agent via `IdentityAgent`
+- SSH: exec, persistent PTY shell with state preservation, ProxyJump via ssh_config, multi-address fallback, auto-reconnect after sshd kill, persistence across full daemon restart
 - SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
 - Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
 - Daemon: daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
@@ -156,6 +171,7 @@ MCP client takes) and exercises:
 ```
 cmd/
   remote-shell-mcpd/   daemon entry point (the only binary)
+Makefile               local build of remote-shell-mcpd into ./bin/
 internal/
   sshx/                SSH manager, dial chain, PTY shells, SFTP, keepalive
   mcptools/            MCP tool registrations, debounced state flusher, tool toggler

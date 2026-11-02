@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -68,6 +69,123 @@ func TestWebUIPageServed(t *testing.T) {
 	if code := httpReq(t, d, "GET", "/", d.Addr(), "", "", ""); code != 200 {
 		t.Fatalf("GET / = %d, want 200", code)
 	}
+}
+
+type hostsView struct {
+	Hosts []struct {
+		Alias   string `json:"alias"`
+		Exposed bool   `json:"exposed"`
+	} `json:"hosts"`
+	Error string `json:"error"`
+}
+
+func getHosts(t *testing.T, d *Daemon) hostsView {
+	t.Helper()
+	var view hostsView
+	if code := apiJSON(t, d, "GET", "/hosts", nil, &view); code != 200 {
+		t.Fatalf("GET /api/hosts = %d", code)
+	}
+	if view.Error != "" {
+		t.Fatalf("hosts error: %s", view.Error)
+	}
+	return view
+}
+
+func TestWebUIHostsHiddenUntilExposed(t *testing.T) {
+	d := startGuardDaemon(t)
+	body := httpBody(t, d, "GET", "/")
+	if !strings.Contains(body, "SSH Hosts") || !strings.Contains(body, "exposes that host") {
+		t.Fatalf("page missing per-host switches")
+	}
+	view := getHosts(t, d)
+	for _, h := range view.Hosts {
+		if h.Exposed {
+			t.Fatalf("host %s exposed by default", h.Alias)
+		}
+	}
+	if toolListed(t, d, "ssh_hosts") {
+		t.Fatalf("ssh_hosts listed before any host was exposed")
+	}
+	if len(view.Hosts) == 0 {
+		t.Skip("no concrete hosts in ssh config")
+	}
+	alias := view.Hosts[0].Alias
+	if code := apiJSON(t, d, "POST", "/hosts/set", map[string]any{"alias": alias, "exposed": true}, nil); code != 200 {
+		t.Fatalf("expose %s = %d", alias, code)
+	}
+	if !toolListed(t, d, "ssh_hosts") {
+		t.Fatalf("ssh_hosts not listed after exposing %s", alias)
+	}
+	view = getHosts(t, d)
+	for _, h := range view.Hosts {
+		if h.Alias == alias && !h.Exposed {
+			t.Fatalf("%s not marked exposed", alias)
+		}
+		if h.Alias != alias && h.Exposed {
+			t.Fatalf("%s exposed along with %s", h.Alias, alias)
+		}
+	}
+	if code := apiJSON(t, d, "POST", "/hosts/set", map[string]any{"alias": alias, "exposed": false}, nil); code != 200 {
+		t.Fatalf("hide %s = %d", alias, code)
+	}
+	if toolListed(t, d, "ssh_hosts") {
+		t.Fatalf("ssh_hosts still listed after the last host was turned off")
+	}
+}
+
+func TestWebUIHostsExposurePersists(t *testing.T) {
+	daemonBin := BuildDaemon(t)
+	dir := t.TempDir()
+	statePath := dir + "/state.json"
+	lockPath := dir + "/daemon.lock"
+	d1 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
+	view := getHosts(t, d1)
+	if len(view.Hosts) < 2 {
+		d1.Stop()
+		t.Skip("need at least two concrete hosts to check per-host persistence")
+	}
+	alias := view.Hosts[0].Alias
+	other := view.Hosts[1].Alias
+	if code := apiJSON(t, d1, "POST", "/hosts/set", map[string]any{"alias": alias, "exposed": true}, nil); code != 200 {
+		t.Fatalf("expose: %d", code)
+	}
+	d1.Stop()
+
+	d2 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
+	defer d2.Stop()
+	if !toolListed(t, d2, "ssh_hosts") {
+		t.Fatalf("ssh_hosts hidden after restart; exposed host was not persisted")
+	}
+	view = getHosts(t, d2)
+	for _, h := range view.Hosts {
+		if h.Alias == alias && !h.Exposed {
+			t.Fatalf("%s lost its exposure across restart", alias)
+		}
+		if h.Alias == other && h.Exposed {
+			t.Fatalf("%s became exposed across restart", other)
+		}
+	}
+}
+
+func httpBody(t *testing.T, d *Daemon, method, path string) string {
+	t.Helper()
+	req, err := http.NewRequest(method, "http://"+d.Addr()+path, nil)
+	if err != nil {
+		t.Fatalf("new req: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("%s %s = %d", method, path, resp.StatusCode)
+	}
+	return string(b)
 }
 
 func TestWebUIToolToggleRoundTrip(t *testing.T) {

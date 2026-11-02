@@ -29,16 +29,13 @@
   .track:before{content:"";position:absolute;width:14px;height:14px;left:2px;top:2px;background:var(--fg);border-radius:50%;transition:.15s}
   input:checked+.track{background:var(--ok)}
   input:checked+.track:before{transform:translateX(16px)}
+  input:indeterminate+.track{background:var(--acc)}
+  input:indeterminate+.track:before{transform:translateX(8px)}
   .group{margin-bottom:1rem}
-  .group h3{font-size:.8rem;color:var(--dim);margin:.4rem 0}
+  .group h3{font-size:.8rem;color:var(--dim);margin:.4rem 0;display:flex;align-items:center;gap:.5rem}
   .tool{display:flex;align-items:center;gap:.7rem;padding:.3rem 0;border-bottom:1px solid #21262d}
   .tool .name{min-width:14em}
   .tool .desc{color:var(--dim);font-size:.8rem;flex:1}
-  form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.5rem;margin-top:.8rem;align-items:end}
-  label{display:flex;flex-direction:column;font-size:.72rem;color:var(--dim);gap:.15rem}
-  input[type=text],input[type=number],select,textarea{background:#0d1117;border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:.35rem .5rem;font:inherit}
-  .checks{grid-column:1/-1;display:flex;gap:1.2rem}
-  .checks label{flex-direction:row;align-items:center;gap:.35rem}
   #msg{min-height:1.2em;color:var(--bad);font-size:.82rem}
   .muted{color:var(--dim);font-size:.8rem}
 </style>
@@ -59,21 +56,25 @@
       <tbody id="sess-body"><tr><td colspan="7" class="muted">loading…</td></tr></tbody>
     </table>
     <div id="msg"></div>
-    <form id="add-form">
-      <label>id<input type="text" id="f-id" required placeholder="prod"></label>
-      <label>user<input type="text" id="f-user" required placeholder="deploy"></label>
-      <label>addresses (comma)<input type="text" id="f-addrs" required placeholder="10.0.0.5, host:22"></label>
-      <label>key_path<input type="text" id="f-key" placeholder="~/.ssh/id_ed25519"></label>
-      <label>jump hosts (user@host,…)<input type="text" id="f-jumps" placeholder="bastion"></label>
-      <div class="checks">
-        <label><input type="checkbox" id="f-agent"> use_agent</label>
-        <label><input type="checkbox" id="f-persist"> persistent</label>
-        <label><input type="checkbox" id="f-reconn"> auto_reconnect</label>
-        <label><input type="checkbox" id="f-fwd"> forward_agent</label>
-        <label><input type="checkbox" id="f-insec"> insecure</label>
-      </div>
-      <button type="submit">connect</button>
-    </form>
+  </section>
+  <section>
+    <h2>MCP Clients</h2>
+    <table>
+      <thead><tr><th>client</th><th>connected</th><th>session</th></tr></thead>
+      <tbody id="clients-body"><tr><td colspan="3" class="muted">loading…</td></tr></tbody>
+    </table>
+  </section>
+  <section>
+    <h2>SSH Hosts</h2>
+    <div class="tool">
+      <span class="muted" id="hosts-note">each switch exposes that host to agents. ssh_hosts stays hidden until one is on.</span>
+      <button type="button" id="hosts-refresh">refresh</button>
+    </div>
+    <p class="muted" id="hosts-err"></p>
+    <table>
+      <thead><tr><th>agent</th><th>alias</th><th>user</th><th>hostname</th><th>port</th><th>proxy jump</th></tr></thead>
+      <tbody id="hosts-body"><tr><td colspan="6" class="muted">loading…</td></tr></tbody>
+    </table>
   </section>
   <section>
     <h2>MCP Tools</h2>
@@ -100,13 +101,13 @@ async function loadSessions(){
     const tb=$('#sess-body');tb.innerHTML='';
     if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="muted">no live sessions</td></tr>';return}
     for(const s of rows){
-      const flags=['persistent','auto_reconnect','forward_agent'].filter(f=>s[f]).map(f=>'<span class="pill">'+f+'</span>').join('');
-      const shells=(s.shells||[]).map(sh=>'<span class="pill">'+esc(sh.id)+' '+esc(sh.age)+'</span>').join('');
+      const flags=['persistent','auto_reconnect'].filter(f=>s[f]).map(f=>'<span class="pill">'+f+'</span>').join('');
+      const shells=(s.shells||[]).map(sh=>'<span class="pill" title="'+(sh.owner?'client '+esc(sh.owner):'webui')+'">'+esc(sh.id)+' '+esc(sh.age)+(sh.owner?' <span class="muted">'+esc(sh.owner)+'</span>':'')+'</span>').join('');
       const tr=document.createElement('tr');
       tr.innerHTML='<td><b>'+esc(s.id)+'</b></td><td class="state-'+esc(s.state)+'">'+esc(s.state)+'</td>'+
         '<td>'+esc(s.user)+'@'+esc((s.active_address||(s.addresses||[])[0]||''))+'</td><td>'+flags+'</td><td>'+shells+'</td>'+
         '<td class="muted">'+esc(s.last_error||'')+'</td>'+
-        '<td><button data-a="reconnect">reconnect</button> <button data-a="edit">edit</button> <button class="danger" data-a="disconnect">disconnect</button></td>';
+        '<td><button data-a="reconnect">reconnect</button> <button class="danger" data-a="disconnect">disconnect</button></td>';
       tr.querySelectorAll('button').forEach(b=>b.onclick=()=>act(s.id,b.dataset.a));
       tb.appendChild(tr);
     }
@@ -114,36 +115,57 @@ async function loadSessions(){
 }
 async function act(id,a){
   $('#msg').textContent='';
-  if(a==='edit'){
-    // Edit = disconnect + reconnect under a new spec, in one action. The
-    // current spec is prefilled so the user only changes what they need.
-    const cur=(await api('GET','/sessions')).find(s=>s.id===id);
-    if(!cur){$('#msg').textContent='session gone';return}
-    const nj=prompt('New spec JSON for "'+id+'" (user/addresses/auth/flags):',JSON.stringify({user:cur.user,addresses:cur.addresses,auth:{use_agent:true},persistent:cur.persistent,auto_reconnect:cur.auto_reconnect,forward_agent:cur.forward_agent}));
-    if(!nj)return;
-    let spec;try{spec=JSON.parse(nj)}catch(e){$('#msg').textContent='bad JSON: '+e.message;return}
-    try{await api('POST','/sessions/disconnect',{id});await api('POST','/sessions/connect',{id,spec});loadSessions()}
-    catch(e){$('#msg').textContent=e.message}
-    return;
-  }
   try{await api('POST','/sessions/'+a,{id});loadSessions()}catch(e){$('#msg').textContent=e.message}
 }
-$('#add-form').onsubmit=async ev=>{
-  ev.preventDefault();$('#msg').textContent='';
-  const spec={user:$('#f-user').value,
-    addresses:$('#f-addrs').value.split(',').map(s=>s.trim()).filter(Boolean),
-    auth:{},
-    persistent:$('#f-persist').checked,auto_reconnect:$('#f-reconn').checked,
-    forward_agent:$('#f-fwd').checked,insecure:$('#f-insec').checked};
-  if($('#f-key').value)spec.auth.key_path=$('#f-key').value;
-  if($('#f-agent').checked)spec.auth.use_agent=true;
-  const jh=$('#f-jumps').value.split(',').map(s=>s.trim()).filter(Boolean);
-  if(jh.length)spec.jump_hosts=jh.map(h=>{const[u,a]=h.split('@');return{user:u||'',addresses:[a||h],auth:spec.auth,insecure:spec.insecure}});
-  try{await api('POST','/sessions/connect',{id:$('#f-id').value,spec});ev.target.reset();loadSessions()}
-  catch(e){$('#msg').textContent=e.message}
-};
+async function loadClients(){
+  try{const rows=await api('GET','/clients');
+    const tb=$('#clients-body');tb.innerHTML='';
+    if(!rows.length){tb.innerHTML='<tr><td colspan="3" class="muted">no clients connected</td></tr>';return}
+    for(const c of rows){
+      const tr=document.createElement('tr');
+      tr.innerHTML='<td><b>'+esc(c.name||'?')+'</b>'+(c.version?' <span class="muted">'+esc(c.version)+'</span>':'')+'</td>'+
+        '<td>'+esc(c.connected_at?new Date(c.connected_at).toLocaleTimeString():'')+'</td>'+
+        '<td class="muted">'+esc((c.session_id||'').replace(/^mcp-session-/,''))+'</td>';
+      tb.appendChild(tr);
+    }
+  }catch(e){}
+}
+async function loadHosts(){
+  try{
+    const s = await api('GET','/hosts');
+    $('#hosts-err').textContent = s.error || '';
+    const tb = $('#hosts-body');
+    tb.innerHTML = '';
+    const rows = s.hosts || [];
+    if(!rows.length){
+      tb.innerHTML = '<tr><td colspan="6" class="muted">no concrete hosts in ~/.ssh/config</td></tr>';
+      return;
+    }
+    for(const h of rows){
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td><label class="switch"><input type="checkbox" '+(h.exposed?'checked':'')+'><span class="track"></span></label></td>'+
+        '<td><b>'+esc(h.alias||'')+'</b></td><td>'+esc(h.user||'')+'</td><td>'+esc(h.hostname||'')+'</td><td>'+esc(h.port||'')+'</td><td class="muted">'+esc(h.proxy_jump||'')+'</td>';
+      const input = tr.querySelector('input');
+      const alias = h.alias;
+      input.onchange = async e => {
+        try{
+          await api('POST','/hosts/set',{alias:alias,exposed:e.target.checked});
+          loadTools();
+        }catch(err){
+          $('#msg').textContent = err.message;
+          e.target.checked = !e.target.checked;
+        }
+      };
+      tb.appendChild(tr);
+    }
+  }catch(e){
+    $('#hosts-body').innerHTML = '<tr><td colspan="6" class="muted">'+esc(e.message)+'</td></tr>';
+  }
+}
+$('#hosts-refresh').onclick = () => loadHosts();
 function group(name){
-  if(/^ssh_(connect|disconnect|list|reconnect)$/.test(name))return'session';
+  if(name==='ssh_hosts')return'hosts';
+  if(/^ssh_(connect|disconnect|sessions|reconnect)$/.test(name))return'session';
   if(/^ssh_exec$/.test(name))return'exec';
   if(name.startsWith('ssh_shell'))return'shell';
   if(name.startsWith('ssh_file')||name==='ssh_upload'||name==='ssh_download')return'file';
@@ -154,14 +176,30 @@ async function loadTools(){
     const groups={};for(const t of tools){(groups[group(t.name)] ||= []).push(t)}
     const el=$('#tools');el.innerHTML='';
     for(const g of Object.keys(groups).sort()){
+      const items=groups[g];
       const div=document.createElement('div');div.className='group';
-      div.innerHTML='<h3>'+esc(g)+'</h3>';
-      for(const t of groups[g]){
+      div.innerHTML='<h3><label class="switch"><input type="checkbox"><span class="track"></span></label><span>'+esc(g)+'</span></h3>';
+      const gin=div.querySelector('h3 input');
+      const allOn=items.every(t=>t.enabled);
+      gin.checked=allOn;
+      gin.indeterminate=!allOn&&items.some(t=>t.enabled);
+      gin.onchange=async e=>{
+        const enabled=e.target.checked;
+        gin.disabled=true;
+        try{
+          for(const t of items){
+            if(t.enabled!==enabled)await api('POST','/tools/set',{name:t.name,enabled});
+          }
+        }catch(err){$('#msg').textContent=err.message}
+        loadTools();
+        if(items.some(t=>t.name==='ssh_hosts'))loadHosts();
+      };
+      for(const t of items){
         const row=document.createElement('div');row.className='tool';
         row.innerHTML='<label class="switch"><input type="checkbox" '+(t.enabled?'checked':'')+'><span class="track"></span></label>'+
           '<span class="name">'+esc(t.name)+'</span><span class="desc">'+esc(t.description||'')+'</span>';
         row.querySelector('input').onchange=async e=>{
-          try{await api('POST','/tools/set',{name:t.name,enabled:e.target.checked});loadTools()}
+          try{await api('POST','/tools/set',{name:t.name,enabled:e.target.checked});loadTools();if(t.name==='ssh_hosts')loadHosts()}
           catch(err){$('#msg').textContent=err.message;e.target.checked=!e.target.checked}
         };
         div.appendChild(row);
@@ -170,8 +208,8 @@ async function loadTools(){
     }
   }catch(e){$('#tools').innerHTML='<span class="muted">'+esc(e.message)+'</span>'}
 }
-loadStatus();loadSessions();loadTools();
-setInterval(loadStatus,3000);setInterval(loadSessions,2500);
+loadStatus();loadSessions();loadClients();loadHosts();loadTools();
+setInterval(loadStatus,3000);setInterval(loadSessions,2500);setInterval(loadClients,2500);
 </script>
 </body>
 </html>

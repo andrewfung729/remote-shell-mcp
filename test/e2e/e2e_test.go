@@ -39,12 +39,9 @@ type execResp struct {
 func sshSpec(t *testing.T, port int) map[string]any {
 	t.Helper()
 	return map[string]any{
-		"user":               sshUser,
-		"addresses":          []string{fmt.Sprintf("127.0.0.1:%d", port)},
-		"auth":               keyAuth(t),
-		"insecure":           true,
-		"timeout":            "10s",
-		"disable_ssh_config": true,
+		"addresses": []string{"testhost"},
+		"insecure":  true,
+		"timeout":   "10s",
 	}
 }
 
@@ -56,7 +53,7 @@ func setupSession(t *testing.T) (*MCPClient, *SSHDContainer, *Daemon, func()) {
 	}
 	EnsureDockerImage(t)
 	sshd := StartSSHDContainer(t)
-	daemon := StartDaemon(t, daemonBin)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + testHome(t, hostBlock(t, "testhost", sshd.SSHPort))}})
 	mc := NewMCPClientForDaemon(t, daemon)
 	teardown := func() {
 		mc.Close()
@@ -98,48 +95,25 @@ func TestSSHConnectAndExec(t *testing.T) {
 	}
 }
 
-// TestSSHConnectRejectsSecrets verifies password and key_passphrase are
-// refused with a corrective message — they can't be persisted for restore,
-// so the daemon rejects them instead of silently ignoring them. No sshd
-// needed: the rejection happens before any dial.
-func TestSSHConnectRejectsSecrets(t *testing.T) {
+// TestSSHConnectRejectsUnknownHost verifies the new contract: callers can't
+// pass credentials, so a first address that matches no concrete Host in
+// ~/.ssh/config fails before any dial. No sshd needed.
+func TestSSHConnectRejectsUnknownHost(t *testing.T) {
 	daemonBin := BuildDaemon(t)
-	daemon := StartDaemon(t, daemonBin)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + t.TempDir()}})
 	defer daemon.Stop()
 	mc := NewMCPClientForDaemon(t, daemon)
 	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	base := map[string]any{
-		"user":               "someone",
-		"addresses":          []string{"127.0.0.1:22"},
-		"insecure":           true,
-		"disable_ssh_config": true,
+	spec := map[string]any{
+		"addresses": []string{"127.0.0.1:22"},
+		"insecure":  true,
 	}
-
-	// password is rejected, naming key_path/use_agent.
-	spec := map[string]any{}
-	for k, v := range base {
-		spec[k] = v
-	}
-	spec["auth"] = map[string]any{"password": "hunter2"}
-	_, err := mc.CallText(ctx, "ssh_connect", map[string]any{"id": "pw", "spec": spec})
-	if err == nil || !strings.Contains(err.Error(), "password") ||
-		!(strings.Contains(err.Error(), "key_path") || strings.Contains(err.Error(), "use_agent")) {
-		t.Fatalf("password not rejected with corrective error, got: %v", err)
-	}
-
-	// key_passphrase is rejected, pointing at ssh-agent.
-	spec2 := map[string]any{}
-	for k, v := range base {
-		spec2[k] = v
-	}
-	spec2["auth"] = map[string]any{"key_path": "/tmp/k", "key_passphrase": "secret"}
-	_, err2 := mc.CallText(ctx, "ssh_connect", map[string]any{"id": "pp", "spec": spec2})
-	if err2 == nil || !strings.Contains(err2.Error(), "key_passphrase") ||
-		!strings.Contains(err2.Error(), "agent") {
-		t.Fatalf("key_passphrase not rejected with corrective error, got: %v", err2)
+	_, err := mc.CallText(ctx, "ssh_connect", map[string]any{"id": "nohost", "spec": spec})
+	if err == nil || !strings.Contains(err.Error(), "ssh/config") {
+		t.Fatalf("unknown host not rejected with corrective error, got: %v", err)
 	}
 }
 
@@ -414,28 +388,31 @@ func TestSFTPFullCoverage(t *testing.T) {
 // TestSSHJumpHost exercises ProxyJump-style multi-hop: connect via the
 // container's sshd as a jump, then SSH to 127.0.0.1:22 INSIDE the container
 // (which loops back through the same sshd). Both hops authenticate with the
-// suite key installed into the container at start.
+// suite key, delivered through the ProxyJump directive in ssh_config.
 func TestSSHJumpHost(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
+	daemonBin := BuildDaemon(t)
+	if err := exec.Command("docker", "version").Run(); err != nil {
+		t.Skipf("docker not available: %v", err)
+	}
+	EnsureDockerImage(t)
+	sshd := StartSSHDContainer(t)
+	defer sshd.Stop()
+
+	// bastion = the container's published sshd port; target = sshd's own
+	// loopback as seen through the jump.
+	target := "Host targethost\n  HostName 127.0.0.1\n  Port 22\n  User " + sshUser +
+		"\n  IdentityFile " + keyIdentityFile(t) + "\n  ProxyJump bastion"
+	bastion := hostBlock(t, "bastion", sshd.SSHPort)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + testHome(t, target, bastion)}})
+	defer daemon.Stop()
+	mc := NewMCPClientForDaemon(t, daemon)
+	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	spec := map[string]any{
-		"user": sshUser,
-		// Final target is reached via the jump's perspective, so 127.0.0.1:22
-		// resolves on the jump host (= the container itself).
-		"addresses": []string{"127.0.0.1:22"},
-		"auth":      keyAuth(t),
+		"addresses": []string{"targethost"},
 		"insecure":  true,
-		"jump_hosts": []map[string]any{
-			{
-				"user":      sshUser,
-				"addresses": []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-				"auth":      keyAuth(t),
-				"insecure":  true,
-			},
-		},
 	}
 	if _, err := mc.Call(ctx, "ssh_connect", map[string]any{"id": "jh", "spec": spec}); err != nil {
 		t.Fatalf("ssh_connect via jump: %v", err)
@@ -454,16 +431,27 @@ func TestSSHJumpHost(t *testing.T) {
 // TestSSHMultiAddress confirms ssh_connect tries addresses in order: an
 // unreachable address first, the real container second.
 func TestSSHMultiAddress(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
+	daemonBin := BuildDaemon(t)
+	if err := exec.Command("docker", "version").Run(); err != nil {
+		t.Skipf("docker not available: %v", err)
+	}
+	EnsureDockerImage(t)
+	sshd := StartSSHDContainer(t)
+	defer sshd.Stop()
+
+	// deadhost resolves to a port nothing listens on; the daemon should fall
+	// through to testhost.
+	dead := hostBlock(t, "deadhost", 1)
+	live := hostBlock(t, "testhost", sshd.SSHPort)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + testHome(t, dead, live)}})
+	defer daemon.Stop()
+	mc := NewMCPClientForDaemon(t, daemon)
+	defer mc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	// 127.0.0.1:1 is essentially always closed; daemon should fall through.
 	spec := map[string]any{
-		"user":      sshUser,
-		"addresses": []string{"127.0.0.1:1", fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":      keyAuth(t),
+		"addresses": []string{"deadhost", "testhost"},
 		"insecure":  true,
 		"timeout":   "2s",
 	}
@@ -479,21 +467,32 @@ func TestSSHMultiAddress(t *testing.T) {
 	}
 }
 
-// TestSSHKeyAuth exercises per-spec key auth: a fresh ephemeral keypair
-// (not the baked-in suite key) installed into the container at test time.
+// TestSSHKeyAuth exercises IdentityFile resolution: a fresh ephemeral
+// keypair (not the baked-in suite key) installed into the container at test
+// time, referenced from a dedicated ssh_config entry.
 func TestSSHKeyAuth(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
-	defer teardown()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	daemonBin := BuildDaemon(t)
+	if err := exec.Command("docker", "version").Run(); err != nil {
+		t.Skipf("docker not available: %v", err)
+	}
+	EnsureDockerImage(t)
+	sshd := StartSSHDContainer(t)
+	defer sshd.Stop()
 
 	privPath, pub := GenerateKey(t)
 	InstallAuthorizedKey(t, sshd, pub)
 
+	block := fmt.Sprintf("Host keyhost\n  HostName 127.0.0.1\n  Port %d\n  User %s\n  IdentityFile %s",
+		sshd.SSHPort, sshUser, privPath)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + testHome(t, block)}})
+	defer daemon.Stop()
+	mc := NewMCPClientForDaemon(t, daemon)
+	defer mc.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	spec := map[string]any{
-		"user":      sshUser,
-		"addresses": []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":      map[string]any{"key_path": privPath},
+		"addresses": []string{"keyhost"},
 		"insecure":  true,
 		"timeout":   "10s",
 	}
@@ -534,8 +533,11 @@ func TestSSHAgentAuth(t *testing.T) {
 	InstallAuthorizedKey(t, sshd, pub)
 	authSock := StartSSHAgent(t, privPath)
 
-	// Daemon must see SSH_AUTH_SOCK to talk to the agent.
-	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"SSH_AUTH_SOCK=" + authSock}})
+	// IdentityAgent points the entry at the test agent's socket — this is
+	// the 1Password/gpg-agent path, no SSH_AUTH_SOCK env needed.
+	block := fmt.Sprintf("Host agenthost\n  HostName 127.0.0.1\n  Port %d\n  User %s\n  IdentityAgent %s",
+		sshd.SSHPort, sshUser, authSock)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + testHome(t, block)}})
 	defer daemon.Stop()
 
 	mc := NewMCPClientForDaemon(t, daemon)
@@ -544,9 +546,7 @@ func TestSSHAgentAuth(t *testing.T) {
 	defer cancel()
 
 	spec := map[string]any{
-		"user":      sshUser,
-		"addresses": []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":      map[string]any{"use_agent": true},
+		"addresses": []string{"agenthost"},
 		"insecure":  true,
 		"timeout":   "10s",
 	}
@@ -575,9 +575,7 @@ func TestSSHAutoReconnect(t *testing.T) {
 	defer cancel()
 
 	spec := map[string]any{
-		"user":           sshUser,
-		"addresses":      []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":           keyAuth(t),
+		"addresses":      []string{"testhost"},
 		"insecure":       true,
 		"timeout":        "10s",
 		"keepalive":      "1s",
@@ -601,14 +599,14 @@ func TestSSHAutoReconnect(t *testing.T) {
 		t.Fatalf("kill sshd: %v", err)
 	}
 
-	// Poll ssh_list until state goes through reconnecting/disconnected and back to connected.
+	// Poll ssh_sessions until state goes through reconnecting/disconnected and back to connected.
 	deadline := time.Now().Add(20 * time.Second)
 	var sawReconnecting bool
 	var finalState string
 	for time.Now().Before(deadline) {
 		var rows []sshConnectResp
-		if err := mc.CallJSON(ctx, "ssh_list", nil, &rows); err != nil {
-			t.Fatalf("ssh_list: %v", err)
+		if err := mc.CallJSON(ctx, "ssh_sessions", nil, &rows); err != nil {
+			t.Fatalf("ssh_sessions: %v", err)
 		}
 		finalState = ""
 		for _, s := range rows {
@@ -653,17 +651,17 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 	statePath := stateDir + "/state.json"
 	lockPath := stateDir + "/daemon.lock"
 
-	// Phase 1 — connect a persistent session with the suite key.
-	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
+	// Phase 1 — connect a persistent session against the suite key, resolved
+	// through ssh_config like every other connect.
+	home := testHome(t, hostBlock(t, "testhost", sshd.SSHPort))
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath, Env: []string{"HOME=" + home}})
 	mc := NewMCPClientForDaemon(t, daemon)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	spec := map[string]any{
-		"user":       sshUser,
-		"addresses":  []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":       keyAuth(t),
+		"addresses":  []string{"testhost"},
 		"insecure":   true,
 		"timeout":    "10s",
 		"persistent": true,
@@ -684,8 +682,9 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 		t.Fatalf("state file empty after snapshot: stat=%v size=%v", err, st)
 	}
 
-	// Phase 2 — fresh daemon on a new port, same state file.
-	daemon2 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath})
+	// Phase 2 — fresh daemon on a new port, same state file, same $HOME so
+	// rehydrated specs resolve identically.
+	daemon2 := StartDaemonWith(t, daemonBin, DaemonOpts{StatePath: statePath, LockPath: lockPath, Env: []string{"HOME=" + home}})
 	defer daemon2.Stop()
 	mc2 := NewMCPClientForDaemon(t, daemon2)
 	defer mc2.Close()
@@ -698,8 +697,8 @@ func TestStateAcrossDaemonRestart(t *testing.T) {
 	var found bool
 	for time.Now().Before(deadline) {
 		var list []sshConnectResp
-		if err := mc2.CallJSON(ctx2, "ssh_list", nil, &list); err != nil {
-			t.Fatalf("ssh_list: %v", err)
+		if err := mc2.CallJSON(ctx2, "ssh_sessions", nil, &list); err != nil {
+			t.Fatalf("ssh_sessions: %v", err)
 		}
 		for _, s := range list {
 			if s.ID == "persist-d" && s.State == "connected" {
@@ -773,10 +772,10 @@ func TestManyParallelSessions(t *testing.T) {
 		t.Error(e)
 	}
 
-	// ssh_list should be empty after all disconnects.
+	// ssh_sessions should be empty after all disconnects.
 	var list []sshConnectResp
-	if err := mc.CallJSON(ctx, "ssh_list", nil, &list); err != nil {
-		t.Fatalf("ssh_list: %v", err)
+	if err := mc.CallJSON(ctx, "ssh_sessions", nil, &list); err != nil {
+		t.Fatalf("ssh_sessions: %v", err)
 	}
 	if len(list) != 0 {
 		t.Fatalf("expected 0 sessions after disconnect, got %d", len(list))
@@ -855,7 +854,7 @@ func TestConnectDisconnectRace(t *testing.T) {
 			time.Sleep(time.Duration(i%5) * 5 * time.Millisecond)
 			_, _ = mc.Call(ctx, "ssh_disconnect", map[string]any{"id": id})
 			<-connectDone
-			// Whichever order won, sweep up any leftover so ssh_list is clean.
+			// Whichever order won, sweep up any leftover so ssh_sessions is clean.
 			_, _ = mc.Call(ctx, "ssh_disconnect", map[string]any{"id": id})
 		}()
 	}
@@ -863,8 +862,8 @@ func TestConnectDisconnectRace(t *testing.T) {
 
 	// Daemon should still be responsive and free of stale rc* sessions.
 	var list []sshConnectResp
-	if err := mc.CallJSON(ctx, "ssh_list", nil, &list); err != nil {
-		t.Fatalf("ssh_list after race: %v", err)
+	if err := mc.CallJSON(ctx, "ssh_sessions", nil, &list); err != nil {
+		t.Fatalf("ssh_sessions after race: %v", err)
 	}
 	for _, s := range list {
 		if strings.HasPrefix(s.ID, "rc") {
@@ -940,15 +939,13 @@ func allPresent(s string, n int) bool {
 // old code an explicit Reconnect concurrent with a keepalive-driven
 // attemptReconnect would race, double-dial, and leak SSH clients.
 func TestConcurrentReconnects(t *testing.T) {
-	mc, sshd, _, teardown := setupSession(t)
+	mc, _, _, teardown := setupSession(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	spec := map[string]any{
-		"user":           sshUser,
-		"addresses":      []string{fmt.Sprintf("127.0.0.1:%d", sshd.SSHPort)},
-		"auth":           keyAuth(t),
+		"addresses":      []string{"testhost"},
 		"insecure":       true,
 		"timeout":        "5s",
 		"keepalive":      "1s",
@@ -973,7 +970,7 @@ func TestConcurrentReconnects(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var rows []sshConnectResp
-		if err := mc.CallJSON(ctx, "ssh_list", nil, &rows); err == nil {
+		if err := mc.CallJSON(ctx, "ssh_sessions", nil, &rows); err == nil {
 			connected := false
 			for _, s := range rows {
 				if s.ID == "rc" && s.State == "connected" {
@@ -1003,7 +1000,7 @@ func TestDaemonSurvivesClientReconnect(t *testing.T) {
 	EnsureDockerImage(t)
 	sshd := StartSSHDContainer(t)
 	defer sshd.Stop()
-	daemon := StartDaemon(t, daemonBin)
+	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + testHome(t, hostBlock(t, "testhost", sshd.SSHPort))}})
 	defer daemon.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1022,8 +1019,8 @@ func TestDaemonSurvivesClientReconnect(t *testing.T) {
 		ID    string `json:"id"`
 		State string `json:"state"`
 	}
-	if err := mc2.CallJSON(ctx, "ssh_list", nil, &list); err != nil {
-		t.Fatalf("ssh_list after restart: %v", err)
+	if err := mc2.CallJSON(ctx, "ssh_sessions", nil, &list); err != nil {
+		t.Fatalf("ssh_sessions after restart: %v", err)
 	}
 	var found bool
 	for _, s := range list {
@@ -1034,7 +1031,7 @@ func TestDaemonSurvivesClientReconnect(t *testing.T) {
 	}
 	if !found {
 		raw, _ := json.Marshal(list)
-		t.Fatalf("session did not survive client reconnect; ssh_list=%s", string(raw))
+		t.Fatalf("session did not survive client reconnect; ssh_sessions=%s", string(raw))
 	}
 }
 
@@ -1068,6 +1065,7 @@ func TestStreamableClientReconnectAcrossDaemonRestart(t *testing.T) {
 		StatePath:  stateDir + "/state.json",
 		LockPath:   stateDir + "/daemon.lock",
 		HandlePath: stateDir + "/daemon.json",
+		Env:        []string{"HOME=" + testHome(t, hostBlock(t, "testhost", sshd.SSHPort))},
 	}
 
 	daemon1 := StartDaemonWith(t, daemonBin, opts)

@@ -24,6 +24,9 @@ type State struct {
 	// ToolToggler after the server is built.
 	DisabledTools func() []string
 
+	exposeMu     sync.Mutex
+	exposedHosts []string
+
 	flushStartOnce sync.Once
 	flushReqCh     chan struct{} // capacity 1; coalesced "please flush" signal
 	flushStopCh    chan struct{}
@@ -83,7 +86,28 @@ func (s *State) PersistNow() error {
 	if s.DisabledTools != nil {
 		disabled = s.DisabledTools()
 	}
-	return s.Store.Save(state.Capture(s.SSH, disabled))
+	return s.Store.Save(state.Capture(s.SSH, disabled, s.ExposedHosts()))
+}
+
+// ExposedHosts returns a copy of the aliases the user has exposed to agents.
+func (s *State) ExposedHosts() []string {
+	s.exposeMu.Lock()
+	defer s.exposeMu.Unlock()
+	if len(s.exposedHosts) == 0 {
+		return nil
+	}
+	return append([]string{}, s.exposedHosts...)
+}
+
+// SetExposedHosts replaces the exposed-alias set. An empty list clears it.
+func (s *State) SetExposedHosts(aliases []string) {
+	s.exposeMu.Lock()
+	defer s.exposeMu.Unlock()
+	if len(aliases) == 0 {
+		s.exposedHosts = nil
+		return
+	}
+	s.exposedHosts = append([]string{}, aliases...)
 }
 
 func (s *State) flushLoop() {
@@ -121,17 +145,24 @@ func (s *State) flushLoop() {
 	}
 }
 
-func Build(st *State, name, version string) *server.MCPServer {
+func Build(st *State, reg *ClientRegistry, name, version string) *server.MCPServer {
 	srv := server.NewMCPServer(
 		name, version,
 		server.WithToolCapabilities(true),
 		server.WithLogging(),
+		server.WithInstructions(serverInstructions),
+		server.WithHooks(reg.Hooks()),
 	)
 	RegisterSSH(srv, st)
+	RegisterSSHHosts(srv, st)
 	RegisterSSHShell(srv, st)
 	RegisterSFTP(srv, st)
 	return srv
 }
+
+// serverInstructions is sent to the MCP client in the initialize response.
+// Keep it short — it lands in every agent's context.
+const serverInstructions = `Remote access over SSH through this server's tools. Do NOT shell out to the local ssh/scp/sftp/rsync CLI — use the ssh_* tools here instead (they keep sessions and PTY shells alive across calls). To reach a host: expose it in the WebUI first, get its alias from ssh_hosts, then ssh_connect. ssh_sessions lists already-open connections. For long-running, interactive, or stateful work (cd/env that must persist, vim, tails, deploys) open a persistent shell with ssh_shell_open and run commands in it via ssh_shell_write + ssh_shell_read — do not use ssh_exec for those.`
 
 // resultJSON serializes a result for an MCP text-content reply. All tool
 // results are JSON — the alternative output format was removed (issue #1).
@@ -149,6 +180,35 @@ func jsonResult(v any) (*mcp.CallToolResult, error) {
 
 func resultErr(err error) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultError(err.Error()), nil
+}
+
+// caller returns a stable identifier for the calling MCP client — its
+// clientInfo.name from initialize, falling back to the transport session id
+// for clients that don't send one. Shell handlers use it to scope shells to
+// the client that opened them: each client sees and operates only its own
+// shells on a shared SSH session. Using clientInfo.name (not the session id)
+// keeps ownership stable across a client reconnect or re-handshake.
+func caller(ctx context.Context) string {
+	s := server.ClientSessionFromContext(ctx)
+	if s == nil {
+		return ""
+	}
+	if sci, ok := s.(server.SessionWithClientInfo); ok {
+		if name := sci.GetClientInfo().Name; name != "" {
+			return name
+		}
+	}
+	return s.SessionID()
+}
+
+// owner resolves the shell-owner key for a request: an explicit "client"
+// arg when the caller passed one (lets a client name itself stably, e.g. pi
+// self-identifying as "pi"), else the caller's own identity.
+func owner(ctx context.Context, req mcp.CallToolRequest) string {
+	if c := req.GetString("client", ""); c != "" {
+		return c
+	}
+	return caller(ctx)
 }
 
 func bind[T any](req mcp.CallToolRequest, out *T) error {

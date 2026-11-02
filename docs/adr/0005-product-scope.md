@@ -27,14 +27,17 @@ Applying it removed:
 - **Port forwarding** (all of `-L`/`-R`/`-D`, list, cancel, persistence)
   — it turns the daemon into an SSH management tool, not the remote host
   into a local one.
-- **Session cloning, the status/snapshot/info tools** — `ssh_list` is the
+- **Session cloning, the status/snapshot/info tools** — `ssh_sessions` is the
   single place to discover sessions; the rest was overlapping surface.
 - **The TOON output format** — one result format (JSON); this also removed
   the parser-default(json)/flag-default(toon) inconsistency.
 - **Password and key-passphrase auth** — they cannot be persisted, so a
-  persistent session using them silently failed to restore. Only key-file
-  and ssh-agent auth are accepted; rejected credentials return a corrective
-  error naming `key_path`/`use_agent`.
+  persistent session using them silently failed to restore. Credentials
+  are not part of the spec at all: `ssh_connect` has no `auth` object, and
+  the daemon resolves auth daemon-side from `~/.ssh/config`
+  (`IdentityFile` / `IdentityAgent`). A first address with no concrete
+  Host entry — and therefore nothing to resolve against — fails before
+  any dial.
 - **The one-shot `/rpc` transport, bearer token, `-require-auth`, and
   non-loopback binding** — see ADR-0004.
 - **Dead code**: the auto-spawn helper, unused JSON/SFTP/wait helpers, the

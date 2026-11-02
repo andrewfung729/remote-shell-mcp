@@ -40,16 +40,21 @@ func (cl closerList) Close() {
 // opened (currently just the ssh-agent socket). Always defer cl.Close() in
 // the caller, even on error — Build closes its own state on error paths but
 // the caller must close on the happy path too.
+//
+// The spec is resolved-only: callers never set these fields directly. An
+// empty AuthSpec means the ssh_config entry carried no IdentityFile or
+// IdentityAgent — say so in the error rather than naming fields an agent
+// can't set.
 func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 	// Secrets are rejected outright: a persistent session must be
 	// restorable after a daemon restart, and a password or key passphrase
-	// can't be persisted. Rejecting here (rather than silently ignoring the
-	// field) tells the caller exactly how to fix the request.
+	// can't be persisted. These fields are unreachable over MCP (the spec
+	// schema has no auth object) — the guards cover programmatic use.
 	if a.Password != "" {
-		return nil, nil, errors.New("password auth is not supported: use key_path or use_agent")
+		return nil, nil, errors.New("password auth is not supported: keys must load from disk or ssh-agent")
 	}
 	if a.KeyPassphrase != "" {
-		return nil, nil, errors.New("key_passphrase is not supported: load the encrypted key into ssh-agent (ssh-add) and use use_agent, or point key_path at an unencrypted key")
+		return nil, nil, errors.New("key_passphrase is not supported: load the encrypted key into ssh-agent (ssh-add) and set IdentityAgent in ~/.ssh/config, or point IdentityFile at an unencrypted key")
 	}
 
 	var methods []ssh.AuthMethod
@@ -97,7 +102,7 @@ func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 
 	if len(methods) == 0 {
 		closers.Close()
-		return nil, nil, errors.New("no authentication method provided (set key_path or use_agent)")
+		return nil, nil, errors.New("no auth: the ssh_config entry sets neither IdentityFile nor IdentityAgent")
 	}
 	return methods, closers, nil
 }

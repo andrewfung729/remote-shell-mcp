@@ -134,12 +134,40 @@ func SuiteKey(t *testing.T) (privPath, pubAuthorized string) {
 	return suiteKeyPriv, suiteKeyPub
 }
 
-// keyAuth returns the auth map that goes in an ssh_connect spec — key auth
-// against the suite key installed into each test container.
-func keyAuth(t *testing.T) map[string]any {
+// keyIdentityFile returns the IdentityFile line for the suite key — the
+// same role the old spec.auth.key_path played, now delivered via ssh_config.
+func keyIdentityFile(t *testing.T) string {
 	t.Helper()
 	priv, _ := SuiteKey(t)
-	return map[string]any{"key_path": priv}
+	return priv
+}
+
+// testHome builds a fake $HOME for the daemon: ~/.ssh/config holding one
+// concrete Host entry per alias, plus ~/.ssh/known_hosts (empty is fine —
+// the specs all run insecure=true). Host blocks join with \n because the
+// daemon resolves each connect against the first address's alias.
+func testHome(t *testing.T, blocks ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	sshDir := filepath.Join(dir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(strings.Join(blocks, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write ssh config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), nil, 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	return dir
+}
+
+// hostBlock writes one concrete Host entry for alias pointing at
+// 127.0.0.1:port with the suite key as IdentityFile.
+func hostBlock(t *testing.T, alias string, port int) string {
+	t.Helper()
+	return fmt.Sprintf("Host %s\n  HostName 127.0.0.1\n  Port %d\n  User %s\n  IdentityFile %s",
+		alias, port, sshUser, keyIdentityFile(t))
 }
 
 // SweepStaleContainers removes any leftover containers from previous failed
