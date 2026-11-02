@@ -38,6 +38,12 @@
   .tool .desc{color:var(--dim);font-size:.8rem;flex:1}
   #msg{min-height:1.2em;color:var(--bad);font-size:.82rem}
   .muted{color:var(--dim);font-size:.8rem}
+  #auth-gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:10}
+  #auth-gate[hidden]{display:none}
+  #auth-gate form{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1.5rem;width:24rem;display:grid;gap:.8rem}
+  #auth-gate input[type=password]{background:#0d1117;border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:.4rem .6rem;font:inherit}
+  #auth-gate input[type=password]:focus{border-color:var(--acc);outline:none}
+  #auth-err{min-height:1.2em;color:var(--bad);font-size:.82rem}
 </style>
 </head>
 <body>
@@ -48,6 +54,15 @@
   <span class="stat"><span id="st-listen">…</span></span>
   <span class="stat">state: <span id="st-state" class="muted">…</span></span>
 </header>
+<div id="auth-gate" hidden>
+  <form id="auth-form" autocomplete="off">
+    <b>Authorize this browser</b>
+    <span class="muted">Paste the one-time token printed in the daemon's terminal at startup.</span>
+    <input type="password" id="auth-token" placeholder="one-time token" required autofocus>
+    <button type="submit">Authorize</button>
+    <div id="auth-err"></div>
+  </form>
+</div>
 <main>
   <section>
     <h2>Sessions</h2>
@@ -86,8 +101,22 @@ const $ = s => document.querySelector(s);
 const api = async (m,p,b) => {
   const r = await fetch('/api'+p,{method:m,headers:b?{'Content-Type':'application/json'}:{},body:b?JSON.stringify(b):undefined});
   const t = await r.json().catch(()=>({}));
+  if(r.status===401){$('#auth-gate').hidden=false;$('#auth-token').focus()}
   if(!r.ok) throw new Error(t.error||('HTTP '+r.status));
   return t;
+};
+$('#auth-form').onsubmit = async e => {
+  e.preventDefault();
+  $('#auth-err').textContent='';
+  try{
+    await api('POST','/auth/exchange',{token:$('#auth-token').value.trim()});
+    $('#auth-token').value='';
+    $('#auth-gate').hidden=true;
+    init();
+  }catch(err){
+    $('#auth-err').textContent=err.message;
+    $('#auth-token').select();
+  }
 };
 async function loadStatus(){
   try{const s=await api('GET','/status');
@@ -208,7 +237,8 @@ async function loadTools(){
     }
   }catch(e){$('#tools').innerHTML='<span class="muted">'+esc(e.message)+'</span>'}
 }
-loadStatus();loadSessions();loadClients();loadHosts();loadTools();
+function init(){loadStatus();loadSessions();loadClients();loadHosts();loadTools()}
+init();
 setInterval(loadStatus,3000);setInterval(loadSessions,2500);setInterval(loadClients,2500);
 </script>
 </body>

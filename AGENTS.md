@@ -49,6 +49,12 @@ workflow rules).
 - Tool-set scope rule (ADR-0005): a capability belongs only if it makes the
   remote host usable as a local tool — run commands, hold a shell, move
   files. Judge additions against that, not per feature.
+- Test seam: a test that needs no remote host and no process boundary is a
+  unit test. Build the daemon's HTTP surface with `daemon.NewApp` and serve it
+  from `httptest` (`internal/daemon/app_test.go`) — that exercises `/mcp` and
+  `/api` exactly as the binary serves them. The `e2e` tag is only for what
+  genuinely needs real sshd or the real binary (exit codes, printed token).
+  Do not spawn a daemon or a container to check HTTP/WebUI behavior.
 - E2E tests live behind the `e2e` build tag, run real sshd (via a
   Docker container as test fixture), and talk to the daemon's `/mcp`
   endpoint through the mcp-go streamable HTTP client — the same path a real

@@ -312,10 +312,10 @@ type Daemon struct {
 	handlePath string
 	statePath  string
 	stop       context.CancelFunc
-	stderr     *bytes.Buffer
-	stdout     *bytes.Buffer // captures the printed WebUI token
-	token      string        // one-time WebUI token scraped from stdout
-	authCookie string        // session cookie after a successful exchange
+	stderr     *syncBuffer
+	stdout     *syncBuffer // captures the printed WebUI token
+	token      string      // one-time WebUI token scraped from stdout
+	authCookie string      // session cookie after a successful exchange
 }
 
 type DaemonOpts struct {
@@ -357,7 +357,7 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 		"-log", "text",
 	)
 	cmd.Env = append(os.Environ(), opts.Env...)
-	var stderr, stdout bytes.Buffer
+	var stderr, stdout syncBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -372,6 +372,26 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 	}
 	d.token = scrapeToken(stdout.String())
 	return d
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent use. exec.Cmd writes to
+// stdout/stderr from its own copy goroutine while the test reads them (token
+// scrape, stderr diagnostics) — a bare bytes.Buffer races there.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func (d *Daemon) HandlePath() string { return d.handlePath }

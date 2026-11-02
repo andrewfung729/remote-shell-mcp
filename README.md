@@ -115,7 +115,10 @@ clients and `curl` send no `Origin` and pass through.
 ## WebUI
 
 Point a browser at the daemon's address (default `http://127.0.0.1:47180`)
-to open the configuration/monitoring page. It shows:
+to open the configuration/monitoring page. On first visit it asks for the
+one-time token the daemon prints to its terminal at startup; entering it
+mints a session cookie (the token is single-use, and restarting the daemon
+regenerates it). It shows:
 
 - **Status** — uptime, version, listen address, state-file path.
 - **Sessions** — every live session with state, user@addr, flags
@@ -146,25 +149,46 @@ bundler, no build step; `go build` is the only build. It deliberately has
 **no command execution, file browsing, or terminal** — those stay MCP-only
 capabilities for the agent.
 
-## End-to-end tests
+## Tests
 
-Requires Docker. First run builds a small `alpine + openssh + busybox-httpd` test image (~20 MB).
+Unit tests need no Docker, no sshd and no daemon process:
+
+```
+go vet ./...
+go test -race -count=1 ./...
+```
+
+They build the daemon's HTTP surface with `daemon.NewApp` and serve it from
+`httptest`, so `/mcp` and `/api` are exercised exactly as the binary serves
+them: the Host/Origin guard, the WebUI API and one-time token auth, exposure
+gating, tool toggles and their persistence, plus the shell-output
+post-processing, host-argument validation, ssh_config resolution, and the
+state store and daemon lock.
+
+End-to-end tests drive the real binary. The shell/file ones need Docker — the
+first run builds a small `alpine + openssh + busybox-httpd` test image
+(~20 MB); the process-boundary ones (startup exit codes, the printed WebUI
+token) need only the built binary.
 
 ```
 go test -race -tags e2e -count=1 ./test/e2e/
 ```
 
-The suite (30+ tests, race-clean) drives the daemon through the spec
-Streamable HTTP `/mcp` endpoint using the mcp-go client (same path a real
-MCP client takes) and exercises:
+That suite runs the real daemon binary against a real sshd container,
+driving it through the spec Streamable HTTP `/mcp` endpoint with the same
+mcp-go client a real MCP client uses, and covers what a fake can't:
 
-- Auth: ephemeral key file via `IdentityFile` in a generated ssh_config
-  (suite fixture + per-test keypairs), ssh-agent via `IdentityAgent`
-- SSH: exec, persistent PTY shell with state preservation, ProxyJump via ssh_config, multi-address fallback, auto-reconnect after sshd kill, persistence across full daemon restart
-- SFTP: mkdir / chmod / stat / rename / upload / download / delete; rejects `data` + `data_base64` set together
-- Concurrency: 8 parallel writers to the same shell, 6 simultaneous reconnects, 10 parallel sessions, 12 overlapping connect/disconnect pairs
-- Daemon: daemon survives client disconnect/reconnect, streamable client reconnect across a full daemon restart, 2 MiB MCP response round-trip
-- WebUI/guard: Host/Origin rejection (hostile Origin + spoofed Host), JSON content-type on /api POSTs, bound-port Host check, /api status/sessions, static page, tool disable/enable removing and restoring the tool from MCP tools/list, disabled state persisting across restart
+- SSH shells: single-call command with exit code and cwd, `cd`/`export`
+  persistence, named parallel shells, timeout → `running` → `poll`,
+  `interrupt`, `input` to an interactive command, `shell busy`, `reset`,
+  reconnect after an sshd kill, and rc fixtures (broken rc → `shell_degraded`,
+  noisy banner/PS1 → clean output)
+- Exposure boundary: unexposed and revoked hosts refused by the shell and
+  file tools; revoking a host closes its session and shells
+- File tools keyed by `host`; the state file never holds session material
+- WebUI sessions endpoint over a live session (list / reconnect / disconnect)
+- Process boundary: non-loopback `-addr` rejected, port conflict exits
+  non-zero, and the one-time WebUI token printed on stdout works exactly once
 
 ## Project layout
 
@@ -176,8 +200,9 @@ internal/
   sshx/                SSH manager, dial chain, PTY shells, SFTP, keepalive
   mcptools/            MCP tool registrations, debounced state flusher, tool toggler
   webui/               /api handlers + embedded single-page UI (no build step)
-  state/               on-disk session persistence/restore
-  daemon/              pidfile lock, handle publish, loopback listener, Host/Origin guard
+  state/               on-disk state (exposed hosts + disabled tools)
+  daemon/              pidfile lock, handle publish, Host/Origin guard, NewApp wiring
+  mcptest/             MCP client helper shared by unit and e2e tests
 test/e2e/              end-to-end tests + sshd container Dockerfile
 ```
 

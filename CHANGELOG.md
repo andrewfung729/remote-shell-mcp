@@ -4,6 +4,19 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
 
 ## Unreleased
 
+- **Faster tests: no-sshd coverage moved out of e2e.** The Host/Origin guard,
+  the WebUI `/api` surface (status, sessions, hosts, tools, one-time token
+  auth, the static page), exposure gating and tool-toggle persistence are now
+  unit tests that serve the production wiring (`daemon.NewApp`) from
+  `httptest`, so they run in `go test ./...` without Docker. Handler wiring
+  moved out of `cmd/remote-shell-mcpd/main.go` into `internal/daemon/app.go`;
+  `main` is flags, listener, lock, handle file and signals. The `e2e` suite
+  keeps only what needs real sshd or the process boundary (exit codes, the
+  printed WebUI token). `internal/mcptest` holds the single streamable-HTTP
+  MCP client both test layers use.
+- **Fixed a data race in the e2e harness.** The daemon's stdout/stderr buffers
+  are now written through a mutex-guarded writer, so `-race` no longer trips
+  when a test scrapes the WebUI token while the process is still writing.
 - **MCP server instructions.** The initialize response now carries a short instruction: use the `ssh_*` tools here, not the local `ssh`/`scp`/`sftp`/`rsync` CLI; hosts must be exposed in the WebUI before `ssh_hosts` will name them.
 
 - **`ssh_hosts` returns alias names only.** It no longer leaks user, hostname, port, or ProxyJump to the agent — the daemon resolves those internally. An exposed host is exactly an opaque name the agent can hand back to `ssh_connect`.

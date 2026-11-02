@@ -15,13 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mark3labs/mcp-go/server"
-
 	"github.com/jaenster/remote-shell-mcp/internal/daemon"
-	"github.com/jaenster/remote-shell-mcp/internal/mcptools"
-	"github.com/jaenster/remote-shell-mcp/internal/sshx"
-	"github.com/jaenster/remote-shell-mcp/internal/state"
-	"github.com/jaenster/remote-shell-mcp/internal/webui"
 )
 
 const (
@@ -33,7 +27,6 @@ const (
 	// daemon. Pass -addr/REMOTE_SHELL_MCP_ADDR to override (tests use :0 or
 	// explicit addrs).
 	defaultAddr = "127.0.0.1:47180"
-	serverName  = "remote-shell-mcp"
 )
 
 // version is the daemon's reported MCP server version. The release pipeline
@@ -112,103 +105,43 @@ func main() {
 	}
 	defer os.Remove(*handlePath)
 
-	store, err := state.NewStore(*statePath)
+	// Everything below the listener — state store, SSH manager, MCP server,
+	// tool toggler, WebUI — is wired by daemon.NewApp, which the unit tests
+	// build directly. The WebUI token is minted there too: one random value
+	// per start, printed once below and exchanged once for the session
+	// cookie. Anyone who can read this stdout can open the WebUI — keep the
+	// daemon's log private (see README's launchd warning).
+	app, err := daemon.NewApp(daemon.AppOptions{
+		BoundAddr: boundAddr,
+		StatePath: *statePath,
+		Version:   version,
+		Log:       log,
+	})
 	if err != nil {
-		log.Error("init state store", "err", err)
+		_ = ln.Close()
+		log.Error("init daemon", "err", err)
 		os.Exit(1)
 	}
-	sshMgr := sshx.NewManager()
-	st := &mcptools.State{SSH: sshMgr, Store: store, Log: log}
 
-	var snap *state.Snapshot
-	if s, err := store.Load(); err != nil {
-		log.Warn("load state", "err", err)
-	} else {
-		snap = s
-	}
-
-	// Start the debounced state flusher before serving traffic so the first
-	// tool calls don't fall back to synchronous writes. We do NOT defer Stop()
-	// here — Stop calls PersistNow as its last act, and we need that to happen
-	// BEFORE CloseAll empties the managers (otherwise the final write
-	// captures empty state and clobbers everything that was just saved).
-	st.Start()
-
-	clients := mcptools.NewClientRegistry()
-	mcpServer := mcptools.Build(st, clients, serverName, version)
-
-	// Tool toggling: the WebUI flips MCP tools on/off without a restart.
-	// Apply the persisted disabled set, then feed future flushes the live set.
-	toggler := mcptools.NewToolToggler(mcpServer, st)
-	var disabled []string
-	if snap != nil {
-		disabled = snap.DisabledTools
-	}
-	configured, cfgErr := sshx.ConfiguredHosts("")
-	if cfgErr != nil {
-		log.Warn("read ssh config", "err", cfgErr)
-	}
-	aliases := make([]string, 0, len(configured))
-	for _, h := range configured {
-		aliases = append(aliases, h.Alias)
-	}
-	var exposed []string
-	if cfgErr != nil && snap != nil {
-		exposed = append([]string{}, snap.ExposedHosts...)
-	} else {
-		exposed = state.EffectiveExposedHosts(snap, aliases)
-	}
-	st.SetExposedHosts(exposed)
-	// ssh_hosts and ssh_shell stay hidden until the user exposes a host.
-	toggler.ApplyDisabled(mcptools.WithHostsExposure(disabled, len(exposed) > 0))
-	st.DisabledTools = toggler.DisabledNames
-
-	streamable := server.NewStreamableHTTPServer(mcpServer,
-		server.WithEndpointPath("/mcp"),
-		server.WithHeartbeatInterval(15*time.Second),
-	)
-	// Single transport: /mcp, the spec Streamable HTTP endpoint remote MCP
-	// clients register against. Loopback-only binds make this safe to serve
-	// unauthenticated.
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", streamable)
-	// The WebUI serves /api/* and the embedded page at /. Its handlers call
-	// the manager/store/toggler directly — not MCP tools — so no tool toggle
-	// can lock the page out.
-	// The WebUI token is the only credential the daemon mints: one random
-	// value per start, printed once here, exchanged once for the session
-	// cookie. Anyone who can read this stdout can open the WebUI — keep
-	// the daemon's log private (see README's launchd warning).
-	token := webui.GenerateToken()
-	ui := webui.New(&webui.Deps{
-		SSH: sshMgr, Store: store, Toggler: toggler, Clients: clients,
-		Version: version, BoundAddr: boundAddr, Log: log, Token: token,
-	})
-	mux.Handle("/api/", ui)
-	mux.Handle("/", ui)
-	// Wrap the whole mux so a hostile web page can't drive the daemon:
-	// Host must be loopback on the bound port (DNS-rebinding), any Origin
-	// must be same-origin, and /api POSTs must carry a JSON content type.
+	// Defend against slowloris from a local process holding a connection open
+	// without sending headers. The streamable transport's GET stream is
+	// long-lived, so we don't set ReadTimeout / WriteTimeout (which would
+	// kill it); ReadHeaderTimeout only applies to the request line + headers.
 	httpSrv := &http.Server{
-		Handler: daemon.Guard(boundAddr, "/api", mux),
-		// Defend against slowloris from a local process holding a connection
-		// open without sending headers. The streamable transport's GET stream
-		// is long-lived, so we don't set ReadTimeout / WriteTimeout (which
-		// would kill it); ReadHeaderTimeout only applies to the request line
-		// + headers.
+		Handler:           app.Handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", boundAddr, "mcp", "/mcp",
-			"state", store.Path(), "handle", *handlePath)
+			"state", app.Store.Path(), "handle", *handlePath)
 		errCh <- httpSrv.Serve(ln)
 	}()
 	// Printed once, on stdout — the operator sees it in the terminal where
 	// they started the daemon. It is NOT in the log line above and NOT in
 	// the handle file; a local agent must not be able to scrape it.
-	fmt.Printf("\nWebUI: http://%s/\n  one-time token: %s\n\n", boundAddr, token)
+	fmt.Printf("\nWebUI: http://%s/\n  one-time token: %s\n\n", boundAddr, app.Token)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -224,14 +157,11 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = streamable.Shutdown(ctx)
+	// Stop the MCP transport first so its long-lived streams don't hold the
+	// HTTP drain open; then the flusher, then sessions (see App.Close).
+	app.StopMCP(ctx)
 	_ = httpSrv.Shutdown(ctx)
-
-	// Stop the flusher (drains its goroutine and does one final synchronous
-	// write of CURRENT state, before we tear sessions down). Order matters:
-	// Stop → CloseAll, never the reverse.
-	st.Stop()
-	sshMgr.CloseAll()
+	app.Close()
 	log.Info("shutdown complete")
 }
 

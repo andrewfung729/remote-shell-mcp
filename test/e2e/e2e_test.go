@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/jaenster/remote-shell-mcp/internal/mcptest"
 )
 
 func TestMain_BinariesAndImage(t *testing.T) {
@@ -37,7 +37,7 @@ type shellResp struct {
 // setupDaemon boots a daemon over a real sshd container with the "testhost"
 // alias configured but NOT yet exposed — exposure is per-test via the WebUI
 // API so the exposure boundary is exercised end to end.
-func setupDaemon(t *testing.T) (*MCPClient, *SSHDContainer, *Daemon, func()) {
+func setupDaemon(t *testing.T) (*mcptest.Client, *SSHDContainer, *Daemon, func()) {
 	t.Helper()
 	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
@@ -49,7 +49,7 @@ func setupDaemon(t *testing.T) (*MCPClient, *SSHDContainer, *Daemon, func()) {
 	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + home}})
 	exchangeToken(t, daemon)
 	exposeHost(t, daemon, "testhost")
-	mc := NewMCPClientForDaemon(t, daemon)
+	mc := mcptest.New(t, daemon.Addr())
 	teardown := func() {
 		mc.Close()
 		daemon.Stop()
@@ -111,7 +111,7 @@ func unexposeHost(t *testing.T, d *Daemon, alias string) {
 }
 
 // run is the one-call convenience: ssh_shell host+command, must finish.
-func run(t *testing.T, mc *MCPClient, host, cmd string) shellResp {
+func run(t *testing.T, mc *mcptest.Client, host, cmd string) shellResp {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -321,28 +321,6 @@ func TestShellReset(t *testing.T) {
 
 // --- exposure boundary --------------------------------------------------------
 
-func TestUnexposedHostRejected(t *testing.T) {
-	mc, _, d, teardown := setupDaemon(t)
-	defer teardown()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	_, err := mc.CallText(ctx, "ssh_shell", map[string]any{"host": "ghosthost", "command": "id"})
-	if err == nil || !strings.Contains(err.Error(), "host not exposed") {
-		t.Fatalf("unexposed host not refused: %v", err)
-	}
-	_, err = mc.CallText(ctx, "ssh_file_list", map[string]any{"host": "ghosthost", "path": "/"})
-	if err == nil || !strings.Contains(err.Error(), "host not exposed") {
-		t.Fatalf("file tool on unexposed host not refused: %v", err)
-	}
-	unexposeHost(t, d, "testhost")
-	_, err2 := mc.CallText(ctx, "ssh_shell", map[string]any{"host": "testhost", "command": "id"})
-	if err2 == nil || !strings.Contains(err2.Error(), "host not exposed") {
-		t.Fatalf("revoked host not refused: %v", err2)
-	}
-	exposeHost(t, d, "testhost")
-}
-
 func TestRevokeClosesSessionAndShells(t *testing.T) {
 	mc, _, d, teardown := setupDaemon(t)
 	defer teardown()
@@ -518,50 +496,6 @@ func TestFileToolsUseHost(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("file_list missing e2e.txt")
-	}
-}
-
-// --- tools/list surface ----------------------------------------------------------
-
-func TestToolListSurface(t *testing.T) {
-	mc, _, d, teardown := setupDaemon(t)
-	defer teardown()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	listTools := func() map[string]bool {
-		res, err := mc.c.ListTools(ctx, mcp.ListToolsRequest{})
-		if err != nil {
-			t.Fatalf("tools/list: %v", err)
-		}
-		out := map[string]bool{}
-		for _, tt := range res.Tools {
-			out[tt.Name] = true
-		}
-		return out
-	}
-
-	tools := listTools()
-	for _, gone := range []string{"ssh_connect", "ssh_disconnect", "ssh_sessions", "ssh_reconnect", "ssh_exec", "ssh_shell_open", "ssh_shell_write", "ssh_shell_read", "ssh_shell_resize", "ssh_shell_close", "ssh_shell_list"} {
-		if tools[gone] {
-			t.Fatalf("removed tool %s still listed", gone)
-		}
-	}
-	for _, want := range []string{"ssh_hosts", "ssh_shell", "ssh_file_read", "ssh_upload"} {
-		if !tools[want] {
-			t.Fatalf("expected tool %s not listed: %v", want, tools)
-		}
-	}
-
-	unexposeHost(t, d, "testhost")
-	tools = listTools()
-	if tools["ssh_hosts"] || tools["ssh_shell"] {
-		t.Fatalf("gated tools visible with no exposed host: %v", tools)
-	}
-	exposeHost(t, d, "testhost")
-	tools = listTools()
-	if !tools["ssh_hosts"] || !tools["ssh_shell"] {
-		t.Fatalf("gated tools not restored after re-expose: %v", tools)
 	}
 }
 
