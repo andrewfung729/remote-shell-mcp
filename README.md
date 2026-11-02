@@ -9,7 +9,7 @@
 
 > **Fork of [jaenster/remote-shell-mcp](https://github.com/jaenster/remote-shell-mcp)** — macOS + Linux only (no Windows/FreeBSD). See [FORK.md](FORK.md) for divergences from upstream.
 
-`remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines — `ssh_exec`, persistent PTY shells with state preserved between calls, and SFTP round-trips.
+`remote-shell-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP client (Claude Code, Claude Desktop, Cursor, OpenAI's Codex CLI, …) a real toolbox for working on remote machines — one `ssh_shell` call runs commands on per-host PTY shells with state preserved between calls, plus SFTP round-trips.
 
 It runs as a single long-lived daemon. Your MCP client connects to the daemon's HTTP endpoint directly — there is no stdio shim to install or keep alive. The daemon outlives every client restart, every reload, every "did the connection just drop?" — so the `vim` you opened over a PTY, the keepalive on a flaky link, all keep running.
 
@@ -17,8 +17,9 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 > docs/adr/0004). The stdio launcher, per-client `setup` registrar, and curl
 > installer have been removed. The daemon serves the spec Streamable HTTP
 > transport at `/mcp` on a fixed loopback port. Loopback-only binds are
-> enforced at startup — there is no auth token and no way to expose the
-> daemon on the network.
+> enforced at startup — `/mcp` needs no auth token and there is no way to
+> expose the daemon on the network. The WebUI's `/api` is gated by a
+> one-time-token cookie (ADR-0006).
 
 ```
 ┌──────────────┐   streamable HTTP    ┌────────────────────────┐
@@ -32,11 +33,12 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 
 | Area | What |
 |-|-|
-| **SSH** | named long-lived sessions. `addresses[0]` must be a concrete `Host` alias in the daemon user's `~/.ssh/config` — user, hostname, port, ProxyJump chain, and auth (IdentityFile/IdentityAgent) all resolve from that entry; callers never supply credentials, and a missing or wildcard-only entry fails. keepalive + auto-reconnect with backoff, persistent across daemon restart |
-| **Persistent shells** | full PTY, `cd` + env + `vim` survive between MCP calls and client restarts, write/read/resize/close, parallel-safe writes. Long-lived, not persistent — a daemon restart kills them (the remote bash dies with the connection). For state that outlives the daemon, run `tmux`/`screen` inside the shell. Shells are scoped to the MCP client that opened them: a second client on a shared session sees `shell not found`, while the WebUI sees all shells.
+| **SSH** | transparent sessions — the session id is the host alias, the first call dials automatically. The alias must be a concrete `Host` entry in the daemon user's `~/.ssh/config` — user, hostname, port, ProxyJump chain, and auth (IdentityFile/IdentityAgent) all resolve from that entry; callers never supply credentials, and a missing or wildcard-only entry fails. keepalive + auto-reconnect always on; strict known_hosts |
+| **Shells** | one `ssh_shell` tool on a per-host PTY: `cd` + env + `vim` survive between calls and client restarts; `command`/`poll`/`input`/`interrupt`/`reset`, named parallel shells, 10k head+tail truncation. Long-lived, not persistent — a daemon restart kills them (the remote bash dies with the connection). For state that outlives the daemon, run `tmux`/`screen` inside the shell. Shells are scoped to the MCP client that opened them: a second client on a shared session sees `shell not found`, while the WebUI sees all shells.
 | **SFTP** | read / write / list / stat / mkdir / chmod (octal string) / rename / delete / upload / download, 64 MiB read cap |
-| **Persistence** | session specs (no secrets) saved to `$XDG_CONFIG_HOME/remote-shell-mcp/state.json`; rehydrated on daemon startup |
-| **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. No auth token — the loopback guard (Host/Origin check) is the boundary. |
+| **Host exposure** | the WebUI decides which `~/.ssh/config` aliases agents may use. Every tool refuses an unexposed host with `host not exposed` (without revealing whether the alias exists); `ssh_hosts` + `ssh_shell` are hidden until one host is on; turning a host off disconnects it immediately |
+| **State** | `$XDG_CONFIG_HOME/remote-shell-mcp/state.json` holds only the exposure list + disabled tools — never sessions, hosts' details, or credentials |
+| **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. `/mcp` needs no token; the WebUI's `/api` requires a one-time-token cookie |
 | **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport) — the single MCP transport. |
 | **Output** | tool results are JSON. |
 
@@ -77,15 +79,14 @@ login item) and point every client at.
 | Running `ssh` from a generic Bash MCP | Re-dialed per call | None | Via shelling out to `scp`/`rsync` | Manual |
 | `mcp-server-fetch` / custom HTTP wrappers around the remote | n/a | n/a | n/a | n/a |
 
-Practical consequence: `remote-shell-mcp` lets a model open a session in the morning, run a `tail -f` in a `ssh_shell` for hours, and have all of it still working after the client restarts twice and your laptop went to sleep.
+Practical consequence: `remote-shell-mcp` lets a model run a `tail -f` in a `ssh_shell` in the morning and have it still running, on the same PTY, after the client restarts twice and your laptop went to sleep.
 
 ## Why a daemon?
 
 A stdio MCP server lives and dies with each client connection. That's fine for stateless tools but ruinous for SSH: every Claude Code reload, every `ctrl-C`, every transient shutdown, drops every session, every tunnel, every PTY. With a long-running daemon:
 
 - An `ssh_shell` you `cd /var/log`'d into is still there when the client reconnects.
-- An `auto_reconnect: true` session that lost its TCP transport at 2am is back by 2:05am.
-- A `persistent: true` session written to disk is back after `kill -9 daemon` — but its shells are not. The PTYs were remote processes; they died with the connection and the daemon only re-dials the session.
+- A session that lost its TCP transport at 2am is reconnected by 2:05am — keepalive + auto-reconnect are always on, no flag needed. After `kill -9 daemon` every session and shell is gone, and the next `ssh_shell` call on an exposed host re-dials transparently.
 
 ## Configuration
 
@@ -104,13 +105,22 @@ Defaults live in `$XDG_CONFIG_HOME/remote-shell-mcp/` (`~/.config/remote-shell-m
 
 The daemon only ever binds loopback. A non-loopback `-addr` is rejected at
 startup and a taken port exits non-zero — there is no way to accidentally
-expose command execution to the network. On loopback there is no auth token;
-instead a single guard wraps the whole HTTP mux so a web page you visit can't
+expose command execution to the network. On loopback `/mcp` needs no
+token; instead a single guard wraps the whole HTTP mux so a web page you visit can't
 drive the daemon: the request's `Host` must be a loopback name on the bound
 port (blocks DNS rebinding), any `Origin` header must be same-origin (blocks
 cross-site `fetch()`), and `POST`s under `/api` must carry
 `application/json` (blocks preflight-free simple requests). Native MCP
-clients and `curl` send no `Origin` and pass through.
+clients and `curl` send no `Origin` and pass through — which is why
+`/api` adds its own cookie gate on top (next section).
+
+The exposure list is a real boundary *for agents*, not a sandbox: an agent
+running as the same OS user can still edit the state file, restart the
+daemon, or read your SSH keys. Real isolation needs a separate OS user or
+sandbox. And because the WebUI token prints to the daemon's stdout once,
+do not point its stdout (e.g. launchd `StandardOutPath`) at a
+world-readable log — that would publish the token to anyone who can read
+the file.
 
 ## WebUI
 
@@ -121,11 +131,10 @@ mints a session cookie (the token is single-use, and restarting the daemon
 regenerates it). It shows:
 
 - **Status** — uptime, version, listen address, state-file path.
-- **Sessions** — every live session with state, user@addr, flags
-  (persistent / auto_reconnect), last error, and a read-only
-  list of its open shells (id + age + which client owns it). Sessions are
-  created by agents via `ssh_connect`; the page offers disconnect /
-  reconnect only.
+- **Sessions** — every live session with state, user@addr, last
+  error, and a read-only list of its open shells (name + owning
+  client). Sessions are created transparently on an agent's first
+  call to an exposed host; the page offers disconnect / reconnect only.
 - **MCP Clients** — every connected MCP client (name + version from the
   `initialize` handshake, transport session id, connect time).
 - **SSH hosts** — concrete `Host` aliases from the daemon user's
@@ -142,7 +151,7 @@ regenerates it). It shows:
   Disabling a tool removes it from the MCP `tools/list` and makes calls
   fail; re-enabling restores it instantly (clients get a
   `tools/list_changed` notification). The choice persists across restarts.
-  `ssh_hosts` starts disabled and turns on only while at least one host is exposed.
+  `ssh_hosts` and `ssh_shell` start hidden and turn on only while at least one host is exposed.
 
 The page is plain HTML + vanilla JS embedded in the binary — no Node, no
 bundler, no build step; `go build` is the only build. It deliberately has

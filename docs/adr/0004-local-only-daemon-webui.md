@@ -1,7 +1,15 @@
 # ADR-0004: Local-only daemon with an embedded WebUI
 
-- **Status**: accepted
+- **Status**: accepted — partially superseded by ADR-0006
 - **Date**: 2026-11-02
+
+> **Superseded sections** (kept for history — see ADR-0006 for current
+> truth): "/api needs no auth token" is replaced — `/api` is now gated by
+> a one-time token printed on stdout, exchanged for a session cookie;
+> `/mcp` is still unauthenticated and the Host/Origin guard still wraps
+> the whole mux. "Sessions are created by agents via `ssh_connect`" is
+> stale — sessions are transparent, created on first `ssh_shell`/file
+> call to an exposed host.
 
 ## Context
 
@@ -40,8 +48,8 @@ configuration and monitoring.
   plain HTML/vanilla-JS page (embedded, no build step) for monitoring and
   configuration: daemon status, live sessions (disconnect/reconnect,
   read-only shell list), and per-tool on/off switches. Sessions are
-  created by agents via `ssh_connect` — the page has no manual-connect
-  form and the API no connect route. Its handlers call the
+  created by agents on first use of an exposed host — the page has no
+  manual-connect form and the API no connect route. Its handlers call the
   SSH manager / state store / tool toggler directly — never MCP tools — so
   disabling a tool can't lock the page out. Command execution, file
   browsing, and terminal stay MCP-only.

@@ -4,6 +4,11 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
 
 ## Unreleased
 
+- **Breaking: collapsed the agent surface to `ssh_shell` + `ssh_hosts` + file tools (issue #14, ADR-0006).** One `ssh_shell` call runs a command on a per-host PTY shell and blocks until it ends (clean output + exit code + cwd) or `timeout_ms` expires (`status: running` — `poll` follows, `input` feeds prompts, `interrupt` sends Ctrl-C, `reset` respawns a polluted shell). `cd`/`export` persist between calls; named parallel shells via `shell`. Removed from MCP registration with no backward compatibility: `ssh_connect`, `ssh_disconnect`, `ssh_sessions`, `ssh_reconnect`, `ssh_exec`, `ssh_shell_open`, `ssh_shell_write`, `ssh_shell_read`, `ssh_shell_resize`, `ssh_shell_close`, `ssh_shell_list`. File tools take `host` instead of `session_id`; the `client` parameter is gone (ownership derives from MCP clientInfo).
+- **Transparent sessions; `persistent`, `insecure` and rehydration removed.** The session id is the host alias — the first call dials automatically with keepalive + auto-reconnect always on and strict known_hosts (an unknown key tells the user to ssh once themselves). Sessions are never written to disk: the state file holds only the exposure list and disabled tools, and old state files are not migrated.
+- **Host exposure is now an enforced boundary.** Every tool refuses a non-exposed host with `host not exposed` (without revealing whether the alias exists in ssh config); `ssh_hosts` and `ssh_shell` are hidden from `tools/list` until at least one host is exposed; turning a host off disconnects its session and closes its shells immediately.
+- **WebUI one-time-token auth (supersedes ADR-0004's "no auth token" for `/api`).** The daemon prints a random token to stdout at startup; the page exchanges it once for a 30-day HttpOnly SameSite=Strict cookie, after which the token is dead and sessions live in memory only. `/api/*` without the cookie returns 401 — an agent with `curl` can no longer mint exposure. `/mcp` stays unauthenticated; the Host/Origin guard is unchanged. Documented limit: a same-OS-user agent can still edit the state file or restart the daemon — the exposure list is an agent boundary, not a sandbox, and the daemon's stdout must not go to a world-readable log.
+- **Remote shell layer.** Shells start as `bash -i -l` so rc files (nvm, conda, pyenv) load, then a bootstrap disables echo/prompt/bracketed-paste; completion is a marker carrying exit code + cwd. No first marker within 10 s → respawn on `bash --norc` (or `sh`) with `shell_degraded`. Reconnect yields `shell_restarted`. Output is ANSI/echo/marker-stripped and capped at 10,000 chars head+tail (full output via `poll`).
 - **Faster tests: no-sshd coverage moved out of e2e.** The Host/Origin guard,
   the WebUI `/api` surface (status, sessions, hosts, tools, one-time token
   auth, the static page), exposure gating and tool-toggle persistence are now
@@ -19,8 +24,8 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
   when a test scrapes the WebUI token while the process is still writing.
 - **MCP server instructions.** The initialize response now carries a short instruction: use the `ssh_*` tools here, not the local `ssh`/`scp`/`sftp`/`rsync` CLI; hosts must be exposed in the WebUI before `ssh_hosts` will name them.
 
-- **`ssh_hosts` returns alias names only.** It no longer leaks user, hostname, port, or ProxyJump to the agent — the daemon resolves those internally. An exposed host is exactly an opaque name the agent can hand back to `ssh_connect`.
-- **Renamed `ssh_list` → `ssh_sessions`.** The tool lists live connections held by the daemon, not hosts you can dial — the old name kept being misread as "list of SSH hosts". `ssh_hosts` (unchanged name) is the one that lists connectable `Host` aliases. Both tools' descriptions now cross-reference each other so the distinction is visible from `tools/list` alone.
+- **`ssh_hosts` returns alias names only.** It no longer leaks user, hostname, port, or ProxyJump to the agent — the daemon resolves those internally. An exposed host is exactly an opaque name the agent can hand back to `ssh_shell` or the file tools as `host`.
+- **Renamed `ssh_list` → `ssh_sessions` (later removed entirely with the session tool set — see the `ssh_shell` collapse above).** The tool listed live connections held by the daemon, not hosts you can dial — the old name kept being misread as "list of SSH hosts".
 
 - **SSH host list.** The WebUI shows concrete `Host` aliases from the daemon user's `~/.ssh/config`, each with its own switch. `ssh_hosts` returns only the hosts the user turned on, and stays hidden until at least one is on. Wildcard and `Match` blocks are omitted, and key paths are not returned.
 - **Refocused the product on "remote host as local MCP tools"** (issue #1;
@@ -41,9 +46,11 @@ All notable changes to remote-shell-mcp. Versions follow [Semantic Versioning](h
   key-passphrase auth, the `/rpc` endpoint + bearer token +
   `-require-auth`, non-loopback binding, the auto-spawn helper, assorted
   dead code, and the Docker-era state field.
-- **Auth narrowed** to key-file and ssh-agent only; `ssh_connect` rejects a
-  password or key passphrase with a corrective error. The state file can
-  never hold a secret, so every persistent session is restorable.
+- **Auth narrowed** to key-file and ssh-agent only; the old
+  `ssh_connect` rejected a password or key passphrase with a corrective
+  error (that tool has since been removed with the session surface — the
+  daemon now resolves auth from `~/.ssh/config` on transparent dial).
+  The state file can never hold a secret.
 - **Released binaries now report their real version** — the
   `-X main.version={{.Version}}` ldflag previously named a variable that
   didn't exist; `var version = "dev"` is now injected.

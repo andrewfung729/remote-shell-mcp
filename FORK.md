@@ -87,3 +87,32 @@ adapting to our narrower surface.
   the auto-spawn helper are no-ops here. This is the fork's largest
   divergence — treat upstream "new tool"/"new transport" features with
   suspicion against the ADR-0005 scope rule.
+
+### Agent surface: single `ssh_shell`, enforced exposure, WebUI token
+
+- **What**: the agent-facing tool set collapsed to `ssh_hosts` +
+  `ssh_shell` + the `ssh_file_*`/upload/download set (all keyed by
+  `host`, no `session_id`). `ssh_connect`, `ssh_disconnect`,
+  `ssh_sessions`, `ssh_reconnect`, `ssh_exec`, and every
+  `ssh_shell_open/write/read/resize/close/list` tool are gone from MCP
+  registration — no backward compatibility. Full rationale:
+  docs/adr/0006-agent-surface-ssh-shell.md (issue #14).
+- **Why**: upstream's multi-tool surface made agents lose state (`cd`/
+  `export` did not persist between calls) and made the exposure list an
+  advisory hint any local agent could curl past. One blocking
+  command/poll/input/interrupt/reset tool on a per-host PTY behaves like
+  local bash; exposure is now an enforced boundary.
+- **Also changed**: sessions are transparent (session id = host alias,
+  auto-dial on first use, keepalive + auto-reconnect always on, strict
+  known_hosts — the `persistent` flag, session rehydration and
+  `insecure` are deleted); `ssh_hosts` and `ssh_shell` hide until a
+  host is exposed and revoke-on-unexpose disconnects immediately; `/api`
+  is gated by a one-time token the daemon prints on stdout, exchanged for
+  an HttpOnly SameSite=Strict cookie (`/mcp` stays unauthenticated); the
+  state file holds only the exposure list + disabled tools.
+- **Cherry-pick note**: upstream fixes to `ssh_connect`/`ssh_exec`/
+  `ssh_shell_*` handlers, `session_id` plumbing, the `persistent`/
+  `insecure` flags, or session rehydration are no-ops here — those code
+  paths are deleted. Shell-lifecycle fixes may still apply to
+  `internal/sshx/shellcmd.go` but need adapting to the single-tool
+  command/poll/input/interrupt/reset contract.

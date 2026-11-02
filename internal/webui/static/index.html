@@ -67,8 +67,8 @@
   <section>
     <h2>Sessions</h2>
     <table>
-      <thead><tr><th>id</th><th>state</th><th>user@addr</th><th>flags</th><th>shells</th><th>last error</th><th></th></tr></thead>
-      <tbody id="sess-body"><tr><td colspan="7" class="muted">loading…</td></tr></tbody>
+      <thead><tr><th>id</th><th>state</th><th>user@addr</th><th>shells</th><th>last error</th><th></th></tr></thead>
+      <tbody id="sess-body"><tr><td colspan="6" class="muted">loading…</td></tr></tbody>
     </table>
     <div id="msg"></div>
   </section>
@@ -128,13 +128,12 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 async function loadSessions(){
   try{const rows=await api('GET','/sessions');
     const tb=$('#sess-body');tb.innerHTML='';
-    if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="muted">no live sessions</td></tr>';return}
+    if(!rows.length){tb.innerHTML='<tr><td colspan="6" class="muted">no live sessions</td></tr>';return}
     for(const s of rows){
-      const flags=['persistent','auto_reconnect'].filter(f=>s[f]).map(f=>'<span class="pill">'+f+'</span>').join('');
-      const shells=(s.shells||[]).map(sh=>'<span class="pill" title="'+(sh.owner?'client '+esc(sh.owner):'webui')+'">'+esc(sh.id)+' '+esc(sh.age)+(sh.owner?' <span class="muted">'+esc(sh.owner)+'</span>':'')+'</span>').join('');
+      const shells=(s.shells||[]).map(sh=>'<span class="pill" title="'+(sh.owner?'client '+esc(sh.owner):'webui')+'">'+esc(sh.name)+(sh.owner?' <span class="muted">'+esc(sh.owner)+'</span>':'')+'</span>').join('');
       const tr=document.createElement('tr');
       tr.innerHTML='<td><b>'+esc(s.id)+'</b></td><td class="state-'+esc(s.state)+'">'+esc(s.state)+'</td>'+
-        '<td>'+esc(s.user)+'@'+esc((s.active_address||(s.addresses||[])[0]||''))+'</td><td>'+flags+'</td><td>'+shells+'</td>'+
+        '<td>'+esc(s.user)+'@'+esc((s.active_address||(s.addresses||[])[0]||''))+'</td><td>'+shells+'</td>'+
         '<td class="muted">'+esc(s.last_error||'')+'</td>'+
         '<td><button data-a="reconnect">reconnect</button> <button class="danger" data-a="disconnect">disconnect</button></td>';
       tr.querySelectorAll('button').forEach(b=>b.onclick=()=>act(s.id,b.dataset.a));
@@ -194,9 +193,7 @@ async function loadHosts(){
 $('#hosts-refresh').onclick = () => loadHosts();
 function group(name){
   if(name==='ssh_hosts')return'hosts';
-  if(/^ssh_(connect|disconnect|sessions|reconnect)$/.test(name))return'session';
-  if(/^ssh_exec$/.test(name))return'exec';
-  if(name.startsWith('ssh_shell'))return'shell';
+  if(name==='ssh_shell')return'shell';
   if(name.startsWith('ssh_file')||name==='ssh_upload'||name==='ssh_download')return'file';
   return'other'}
 async function loadTools(){
