@@ -97,11 +97,16 @@ func (s *Session) FileStat(path string) (*FileEntry, error) {
 	}, nil
 }
 
-// maxFileReadBytes caps a single FileRead call to keep a malicious or buggy
-// client from OOMing the daemon by asking for, say, 100 GiB.
-const maxFileReadBytes = 64 * 1024 * 1024
-
-func (s *Session) FileRead(path string, offset int64, length int64) ([]byte, error) {
+// FileReadBounded reads at most limit+1 bytes from the start of path. The one
+// extra byte exists only so the caller can tell "fits" from "does not fit":
+// len(p) > limit means the file is over the caller's budget, and the caller
+// fails the call instead of returning a shortened body. Overflow is decided by
+// the bytes actually read, not by a prior stat — some files (for instance
+// under /proc) report size 0.
+//
+// There is deliberately no offset: a file that does not fit is an error, not a
+// window into something larger, and line windows are sliced from these bytes.
+func (s *Session) FileReadBounded(path string, limit int) ([]byte, error) {
 	c, err := s.sftpClient()
 	if err != nil {
 		return nil, err
@@ -111,28 +116,14 @@ func (s *Session) FileRead(path string, offset int64, length int64) ([]byte, err
 		return nil, err
 	}
 	defer f.Close()
-	if offset > 0 {
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return nil, err
-		}
-	}
-	if length > 0 {
-		if length > maxFileReadBytes {
-			length = maxFileReadBytes
-		}
-		buf := make([]byte, length)
-		n, err := io.ReadFull(f, buf)
-		if err == io.ErrUnexpectedEOF || err == io.EOF {
-			return buf[:n], nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		return buf, nil
-	}
-	return io.ReadAll(io.LimitReader(f, maxFileReadBytes))
+	return io.ReadAll(io.LimitReader(f, int64(limit)+1))
 }
 
+// FileWrite truncates or appends in place, creating the file if it does not
+// exist. It does not create parent directories — the agent makes them through
+// the shell. Writing in place (rather than temp-file-and-rename) keeps the
+// existing inode, so owner, mode, hard links and a symlink all survive; the
+// cost is that a connection lost mid-write can leave a partial file.
 func (s *Session) FileWrite(path string, data []byte, append bool) error {
 	c, err := s.sftpClient()
 	if err != nil {
@@ -151,41 +142,6 @@ func (s *Session) FileWrite(path string, data []byte, append bool) error {
 	defer f.Close()
 	_, err = f.Write(data)
 	return err
-}
-
-func (s *Session) FileDelete(path string) error {
-	c, err := s.sftpClient()
-	if err != nil {
-		return err
-	}
-	return c.Remove(path)
-}
-
-func (s *Session) FileMkdir(path string, recursive bool) error {
-	c, err := s.sftpClient()
-	if err != nil {
-		return err
-	}
-	if recursive {
-		return c.MkdirAll(path)
-	}
-	return c.Mkdir(path)
-}
-
-func (s *Session) FileChmod(path string, mode os.FileMode) error {
-	c, err := s.sftpClient()
-	if err != nil {
-		return err
-	}
-	return c.Chmod(path, mode)
-}
-
-func (s *Session) FileRename(from, to string) error {
-	c, err := s.sftpClient()
-	if err != nil {
-		return err
-	}
-	return c.Rename(from, to)
 }
 
 // Upload streams a local file OR directory to the remote host over SFTP. For a

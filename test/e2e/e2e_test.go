@@ -459,21 +459,36 @@ func TestShellCleanUnderNoisyRC(t *testing.T) {
 
 // --- file tools on the transparent session -------------------------------------
 
+// fileRead is the ssh_file_read JSON result.
+type fileRead struct {
+	Data       string `json:"data"`
+	StartLine  int    `json:"start_line"`
+	Lines      int    `json:"lines"`
+	TotalLines int    `json:"total_lines"`
+	Truncated  bool   `json:"truncated"`
+}
+
+// fileEdit is the ssh_file_edit JSON result.
+type fileEdit struct {
+	StartLine  int `json:"start_line"`
+	TotalLines int `json:"total_lines"`
+}
+
 func TestFileToolsUseHost(t *testing.T) {
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	content := "host-keyed file tools" + string(byte(10))
+	content := "line one\nline two\n"
 	if _, err := mc.Call(ctx, "ssh_file_write", map[string]any{
 		"host": "testhost", "path": "/tmp/e2e.txt", "data": content,
 	}); err != nil {
 		t.Fatalf("file_write: %v", err)
 	}
-	var rd struct {
-		Data string `json:"data"`
-	}
+
+	// A small text write then a read returns the new line-window result.
+	var rd fileRead
 	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": "/tmp/e2e.txt",
 	}, &rd); err != nil {
@@ -482,6 +497,34 @@ func TestFileToolsUseHost(t *testing.T) {
 	if rd.Data != content {
 		t.Fatalf("round-trip mismatch: %q", rd.Data)
 	}
+	if rd.StartLine != 1 || rd.Lines != 2 || rd.TotalLines != 2 {
+		t.Fatalf("line window = %+v, want start_line 1, lines 2, total_lines 2", rd)
+	}
+	if rd.Truncated {
+		t.Fatalf("whole-file read marked truncated: %+v", rd)
+	}
+
+	// The edit lands where the read said it would, and the guard holds the
+	// whole file rather than the text that came back.
+	var ed fileEdit
+	if err := mc.CallJSON(ctx, "ssh_file_edit", map[string]any{
+		"host": "testhost", "path": "/tmp/e2e.txt", "old_text": "line one", "new_text": "line 1",
+	}, &ed); err != nil {
+		t.Fatalf("file_edit: %v", err)
+	}
+	if ed.StartLine != 1 || ed.TotalLines != 2 {
+		t.Fatalf("edit result = %+v, want start_line 1, total_lines 2", ed)
+	}
+	var after fileRead
+	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+		"host": "testhost", "path": "/tmp/e2e.txt",
+	}, &after); err != nil {
+		t.Fatalf("file_read after edit: %v", err)
+	}
+	if after.Data != "line 1\nline two\n" {
+		t.Fatalf("edited file = %q", after.Data)
+	}
+
 	var entries []struct {
 		Name string `json:"name"`
 	}
@@ -496,6 +539,63 @@ func TestFileToolsUseHost(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("file_list missing e2e.txt")
+	}
+}
+
+// TestFileEditRejectsStaleRead needs a real remote change between the read and
+// the edit, so it belongs here rather than on the in-process seams: the daemon
+// must see content that no longer matches what it recorded.
+func TestFileEditRejectsStaleRead(t *testing.T) {
+	mc, _, _, teardown := setupDaemon(t)
+	defer teardown()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	const path = "/tmp/e2e-stale.txt"
+	if _, err := mc.Call(ctx, "ssh_file_write", map[string]any{
+		"host": "testhost", "path": path, "data": "alpha\nbeta\n",
+	}); err != nil {
+		t.Fatalf("file_write: %v", err)
+	}
+	var rd fileRead
+	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+		"host": "testhost", "path": path,
+	}, &rd); err != nil {
+		t.Fatalf("file_read: %v", err)
+	}
+
+	// Someone else changes the file through the shell.
+	run(t, mc, "testhost", "echo changed > "+path)
+
+	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{
+		"host": "testhost", "path": path, "old_text": "alpha", "new_text": "ALPHA",
+	}); err == nil || !strings.Contains(err.Error(), "ssh_file_read") {
+		t.Fatalf("edit after an out-of-band change = %v, want an error naming ssh_file_read", err)
+	}
+
+	// Reading again makes the same edit legal, and it lands.
+	var again fileRead
+	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+		"host": "testhost", "path": path,
+	}, &again); err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if again.Data != "changed\n" {
+		t.Fatalf("out-of-band change not visible: %q", again.Data)
+	}
+	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{
+		"host": "testhost", "path": path, "old_text": "changed", "new_text": "CHANGED",
+	}); err != nil {
+		t.Fatalf("edit after a fresh read: %v", err)
+	}
+	var after fileRead
+	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+		"host": "testhost", "path": path,
+	}, &after); err != nil {
+		t.Fatalf("file_read after edit: %v", err)
+	}
+	if after.Data != "CHANGED\n" {
+		t.Fatalf("edited file = %q", after.Data)
 	}
 }
 

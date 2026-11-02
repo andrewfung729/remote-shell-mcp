@@ -105,13 +105,29 @@ func validateShellArgs(a shellArgs) (shellAction, error) {
 	return act, nil
 }
 
-// sessionFor is the exposure gate + transparent-connect path shared by
-// ssh_shell and every file tool: unexposed hosts get the same refusal, an
-// exposed host's session dials on first use.
-func sessionFor(st *State, host string) (*sshx.Session, error) {
-	if !st.IsExposed(host) {
-		return nil, ErrHostNotExposed
+// targetHost reads the call's host alias. Every tool starts here.
+func targetHost(req mcp.CallToolRequest) (string, error) {
+	host := req.GetString("host", "")
+	if host == "" {
+		return "", errors.New("host is required")
 	}
+	return host, nil
+}
+
+// checkExposed is the exposure gate shared by ssh_shell and every file tool.
+// It runs before any argument check so an unexposed host always gets the same
+// refusal — the message never reveals whether the alias exists in ssh config.
+func checkExposed(st *State, host string) error {
+	if !st.IsExposed(host) {
+		return ErrHostNotExposed
+	}
+	return nil
+}
+
+// dial is the transparent-connect path: an exposed host's session connects on
+// first use. It is the last step, after the exposure check and the argument
+// checks, so a typo never opens a connection.
+func dial(st *State, host string) (*sshx.Session, error) {
 	return st.SSH.Connect(host)
 }
 
@@ -151,6 +167,15 @@ func finish(st *State, res *sshx.RunResult, sh *sshx.Shell, restarted bool) (*mc
 
 func handleSSHShell(st *State) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		host, err := targetHost(req)
+		if err != nil {
+			return resultErr(err)
+		}
+		// Exposure first, then the action arguments, then the dial — the same
+		// order every other tool follows.
+		if err := checkExposed(st, host); err != nil {
+			return resultErr(err)
+		}
 		var args shellArgs
 		if err := bind(req, &args); err != nil {
 			return resultErr(err)
@@ -159,7 +184,7 @@ func handleSSHShell(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		sess, err := sessionFor(st, args.Host)
+		sess, err := dial(st, host)
 		if err != nil {
 			return resultErr(err)
 		}

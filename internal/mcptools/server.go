@@ -19,6 +19,11 @@ type State struct {
 	Store *state.Store
 	Log   *slog.Logger
 
+	// Guard is the read-before-edit record store behind ssh_file_edit: one
+	// in-memory hash per (client, host, path), lost on daemon restart. Its
+	// zero value is ready to use.
+	Guard ReadGuard
+
 	// DisabledTools, when set, supplies the names of the currently-disabled
 	// MCP tools so a state flush persists them. main() wires this to the
 	// ToolToggler after the server is built.

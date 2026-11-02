@@ -44,8 +44,27 @@ Applying it removed:
   docker CLI in the test image, the Docker-era state field.
 
 Kept: session connect/disconnect/reconnect/list, exec, persistent shells,
-the full SFTP set, jump hosts, agent forwarding, auto-reconnect, keepalive,
-ssh config resolution, multi-address fallback, the persistent flag.
+jump hosts, agent forwarding, auto-reconnect, keepalive, ssh config
+resolution, multi-address fallback, the persistent flag.
+
+### Amendment — the file tool set (issue #24)
+
+The same rule, applied to the file tools: **list, stat, bounded text read,
+bounded text write, exactly-once text edit, upload, and download** are kept.
+A file's mode, a directory, a delete, and a rename are **shell commands, not
+tools** — `ssh_shell` can already do them, and a second tool for one job only
+makes an agent pick. The removed delete tool was also the weaker of the two:
+it could not remove a non-empty directory.
+
+`ssh_file_edit` passes the rule for a reason the shell cannot match: the
+shell can change a file, but it cannot check that a change hit exactly one
+place in content the agent has seen, and it cannot refuse an edit of a file
+that changed since that read.
+
+The text read and write carry the shell's context cost, not the transport's
+plumbing: one shared 256 KiB inline budget, a line window instead of byte
+offsets, and an error that names `ssh_download` / `ssh_upload` when the
+payload does not fit — never a shortened body returned as success.
 
 ## Considered options
 
@@ -58,7 +77,8 @@ ssh config resolution, multi-address fallback, the persistent flag.
 
 ## Consequences
 
-- The MCP tool list now contains only what serves the product purpose.
+- The MCP tool list now contains only what serves the product purpose — and,
+  for files, only what the shell cannot replace.
 - The state file can never hold a credential, so every persistent session is
   restorable and the file is safe to inspect/back up.
 - This rule is the documented filter the repo's agent instructions point to

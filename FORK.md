@@ -91,12 +91,22 @@ adapting to our narrower surface.
 ### Agent surface: single `ssh_shell`, enforced exposure, WebUI token
 
 - **What**: the agent-facing tool set collapsed to `ssh_hosts` +
-  `ssh_shell` + the `ssh_file_*`/upload/download set (all keyed by
-  `host`, no `session_id`). `ssh_connect`, `ssh_disconnect`,
-  `ssh_sessions`, `ssh_reconnect`, `ssh_exec`, and every
-  `ssh_shell_open/write/read/resize/close/list` tool are gone from MCP
-  registration — no backward compatibility. Full rationale:
+  `ssh_shell` + the file set (all keyed by `host`, no `session_id`).
+  `ssh_connect`, `ssh_disconnect`, `ssh_sessions`, `ssh_reconnect`,
+  `ssh_exec`, and every `ssh_shell_open/write/read/resize/close/list` tool
+  are gone from MCP registration — no backward compatibility. Full rationale:
   docs/adr/0006-agent-surface-ssh-shell.md (issue #14).
+- **Later (issue #24)**: the file set is `ssh_file_list`, `ssh_file_stat`,
+  a bounded text channel (`ssh_file_read` as a line window,
+  `ssh_file_write`, and `ssh_file_edit` replacing text that occurs exactly
+  once) and the bulk `ssh_upload` / `ssh_download` pair.
+  `ssh_file_chmod`, `ssh_file_mkdir`, `ssh_file_delete` and
+  `ssh_file_rename` are **removed** — upstream still offers them, and its
+  `ssh_file_read` takes byte offsets with a 64 MiB cap. Here read, write and
+  edit share one 256 KiB inline budget, a file over it or not valid UTF-8 is
+  an error naming `ssh_download`, and an edit is refused unless this client
+  read or wrote the file in this daemon run and the content has not changed
+  since. See docs/adr/0005-product-scope.md (amendment).
 - **Why**: upstream's multi-tool surface made agents lose state (`cd`/
   `export` did not persist between calls) and made the exposure list an
   advisory hint any local agent could curl past. One blocking
@@ -111,8 +121,9 @@ adapting to our narrower surface.
   an HttpOnly SameSite=Strict cookie (`/mcp` stays unauthenticated); the
   state file holds only the exposure list + disabled tools.
 - **Cherry-pick note**: upstream fixes to `ssh_connect`/`ssh_exec`/
-  `ssh_shell_*` handlers, `session_id` plumbing, the `persistent`/
-  `insecure` flags, or session rehydration are no-ops here — those code
-  paths are deleted. Shell-lifecycle fixes may still apply to
+  `ssh_shell_*` handlers, `ssh_file_chmod`/`ssh_file_mkdir`/
+  `ssh_file_delete`/`ssh_file_rename`, the byte-offset `ssh_file_read`
+  parameters, `session_id` plumbing, the `persistent`/`insecure` flags,
+  or session rehydration are no-ops here — those code paths are deleted. Shell-lifecycle fixes may still apply to
   `internal/sshx/shellcmd.go` but need adapting to the single-tool
   command/poll/input/interrupt/reset contract.
