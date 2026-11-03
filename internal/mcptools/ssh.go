@@ -126,9 +126,11 @@ func checkExposed(st *State, host string) error {
 
 // dial is the transparent-connect path: an exposed host's session connects on
 // first use. It is the last step, after the exposure check and the argument
-// checks, so a typo never opens a connection.
-func dial(st *State, host string) (*sshx.Session, error) {
-	return st.SSH.Connect(host)
+// checks, so a typo never opens a connection. A call that lands while another
+// is still dialing the same host waits for that dial (bounded by ctx) instead
+// of failing on a half-built session.
+func dial(ctx context.Context, st *State, host string) (*sshx.Session, error) {
+	return st.SSH.Connect(ctx, host)
 }
 
 // shellTimeout clamps timeout_ms to [default, 1h].
@@ -184,7 +186,7 @@ func handleSSHShell(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		sess, err := dial(st, host)
+		sess, err := dial(ctx, st, host)
 		if err != nil {
 			return resultErr(err)
 		}

@@ -13,6 +13,7 @@ import (
 // created lazily by agents via ssh_shell; the API intentionally has no
 // connect route (issue #14).
 func TestWebUISessionLifecycle(t *testing.T) {
+	t.Parallel()
 	mc, _, d, teardown := setupDaemon(t)
 	defer teardown()
 

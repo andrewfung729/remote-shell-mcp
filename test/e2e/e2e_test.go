@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 )
 
 func TestMain_BinariesAndImage(t *testing.T) {
+	t.Parallel()
 	_ = BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
@@ -39,12 +41,24 @@ type shellResp struct {
 // API so the exposure boundary is exercised end to end.
 func setupDaemon(t *testing.T) (*mcptest.Client, *SSHDContainer, *Daemon, func()) {
 	t.Helper()
+	return setupDaemonImage(t, true)
+}
+
+// setupDaemonImage is setupDaemon against either fixture: withBash=false uses
+// the bash-less image, i.e. what a minimal host looks like.
+func setupDaemonImage(t *testing.T, withBash bool) (*mcptest.Client, *SSHDContainer, *Daemon, func()) {
+	t.Helper()
 	daemonBin := BuildDaemon(t)
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
 	EnsureDockerImage(t)
-	sshd := StartSSHDContainer(t)
+	var sshd *SSHDContainer
+	if withBash {
+		sshd = StartSSHDContainer(t)
+	} else {
+		sshd = StartSSHDContainerNoBash(t)
+	}
 	home := testHomeForContainer(t, sshd, hostBlock(t, "testhost", sshd.SSHPort))
 	daemon := StartDaemonWith(t, daemonBin, DaemonOpts{Env: []string{"HOME=" + home}})
 	exchangeToken(t, daemon)
@@ -125,6 +139,7 @@ func run(t *testing.T, mc *mcptest.Client, host, cmd string) shellResp {
 // --- core ssh_shell behavior -------------------------------------------------
 
 func TestShellCommand(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 
@@ -147,6 +162,7 @@ func TestShellCommand(t *testing.T) {
 }
 
 func TestShellPersistsState(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 
@@ -158,6 +174,7 @@ func TestShellPersistsState(t *testing.T) {
 }
 
 func TestShellNamedParallel(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -180,6 +197,7 @@ func TestShellNamedParallel(t *testing.T) {
 }
 
 func TestShellTimeoutThenPoll(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -213,6 +231,7 @@ func TestShellTimeoutThenPoll(t *testing.T) {
 }
 
 func TestShellBusyError(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -236,6 +255,7 @@ func TestShellBusyError(t *testing.T) {
 }
 
 func TestShellInterrupt(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -272,18 +292,22 @@ func TestShellInterrupt(t *testing.T) {
 }
 
 func TestShellInputInteractive(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// The command's own call is still waiting for its marker, so it may be the
+	// one that collects the result. Both callers are legitimate; the assertion
+	// is that the fed line reached the command, not which call returned it.
+	var cmdRes shellResp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		var r shellResp
 		_ = mc.CallJSON(ctx, "ssh_shell", map[string]any{
 			"host": "testhost", "command": "read -p ANSWER: ans; echo got-$ans", "timeout_ms": 15000,
-		}, &r)
+		}, &cmdRes)
 	}()
 	time.Sleep(800 * time.Millisecond)
 	if _, err := mc.Call(ctx, "ssh_shell", map[string]any{"host": "testhost", "input": "hello-input" + string(byte(10))}); err != nil {
@@ -296,12 +320,13 @@ func TestShellInputInteractive(t *testing.T) {
 		t.Fatalf("poll: %v", err)
 	}
 	<-done
-	if !strings.Contains(p.Output, "got-hello-input") {
-		t.Fatalf("interactive input did not reach the command: %q", p.Output)
+	if out := cmdRes.Output + p.Output; !strings.Contains(out, "got-hello-input") {
+		t.Fatalf("interactive input did not reach the command: %q", out)
 	}
 }
 
 func TestShellReset(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 
@@ -322,6 +347,7 @@ func TestShellReset(t *testing.T) {
 // --- exposure boundary --------------------------------------------------------
 
 func TestRevokeClosesSessionAndShells(t *testing.T) {
+	t.Parallel()
 	mc, _, d, teardown := setupDaemon(t)
 	defer teardown()
 
@@ -355,6 +381,7 @@ func TestRevokeClosesSessionAndShells(t *testing.T) {
 // --- transport/respawn -------------------------------------------------------
 
 func TestShellReconnectRespawns(t *testing.T) {
+	t.Parallel()
 	mc, sshd, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -391,6 +418,7 @@ func TestShellReconnectRespawns(t *testing.T) {
 // --- rc fixtures: noisy / broken ----------------------------------------------
 
 func TestShellDegradedOnBrokenRC(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -423,6 +451,7 @@ func TestShellDegradedOnBrokenRC(t *testing.T) {
 }
 
 func TestShellCleanUnderNoisyRC(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -475,6 +504,7 @@ type fileEdit struct {
 }
 
 func TestFileToolsUseHost(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -546,6 +576,7 @@ func TestFileToolsUseHost(t *testing.T) {
 // the edit, so it belongs here rather than on the in-process seams: the daemon
 // must see content that no longer matches what it recorded.
 func TestFileEditRejectsStaleRead(t *testing.T) {
+	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
 	defer teardown()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -599,9 +630,227 @@ func TestFileEditRejectsStaleRead(t *testing.T) {
 	}
 }
 
+// TestShellWithoutBash pins the degraded path: a host with no bash must still
+// run commands, report their exit status and keep state between calls. The
+// fallback shell has no PROMPT_COMMAND, so the completion marker rides in PS1 —
+// without that, every command runs to its timeout and reports status "running",
+// which is what an ssh_shell call on a minimal host used to do.
+func TestShellWithoutBash(t *testing.T) {
+	t.Parallel()
+	mc, _, d, teardown := setupDaemonImage(t, false)
+	defer teardown()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var r shellResp
+	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		"host": "testhost", "command": "command -v bash || echo no-bash-at-all; pwd", "timeout_ms": 20000,
+	}, &r); err != nil {
+		t.Logf("daemon stderr:\n%s", d.stderr.String())
+		t.Fatalf("ssh_shell on a bash-less host: %v", err)
+	}
+	if r.Status != "done" {
+		t.Fatalf("status=%q: the fallback shell never printed a marker", r.Status)
+	}
+	if !strings.Contains(r.Output, "no-bash-at-all") {
+		t.Fatalf("fixture has bash or output is wrong: %q", r.Output)
+	}
+	if r.ExitCode == nil || *r.ExitCode != 0 {
+		t.Fatalf("exit_code=%v, want 0", r.ExitCode)
+	}
+	if r.CWD == "" {
+		t.Fatalf("cwd missing on the fallback shell: %+v", r)
+	}
+	if !r.ShellDegraded {
+		t.Fatalf("expected shell_degraded on a bash-less host: %+v", r)
+	}
+
+	// Exit statuses come through the same path, and cd/env still persist.
+	var st shellResp
+	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		"host": "testhost", "command": "cd /tmp; MARK=fallback", "timeout_ms": 20000,
+	}, &st); err != nil {
+		t.Fatalf("cd on the fallback shell: %v", err)
+	}
+	if st.Status != "done" || st.CWD != "/tmp" {
+		t.Fatalf("cd did not land: %+v", st)
+	}
+	var again shellResp
+	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		"host": "testhost", "command": "echo $MARK; exit 3", "timeout_ms": 20000,
+	}, &again); err != nil {
+		t.Fatalf("second command on the fallback shell: %v", err)
+	}
+	if again.Status != "done" {
+		t.Fatalf("status=%q after exit: %+v", again.Status, again)
+	}
+	if !strings.Contains(again.Output, "fallback") {
+		t.Fatalf("state lost on the fallback shell: %+v", again)
+	}
+	if again.ExitCode == nil || *again.ExitCode != 3 {
+		t.Fatalf("exit_code=%v after 'exit 3', want 3", again.ExitCode)
+	}
+}
+
+// --- path spelling and cold start ---------------------------------------------
+
+// TestTildePathsResolveToHome covers the path an agent naturally writes: "~",
+// "~/x" and the plain relative form must name the same files as the absolute
+// path, and a read spelled one way must license an edit spelled another (the
+// read-before-edit guard keys on the resolved path).
+func TestTildePathsResolveToHome(t *testing.T) {
+	t.Parallel()
+	mc, _, _, teardown := setupDaemon(t)
+	defer teardown()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The fixture sshd logs in as root, so the SFTP session starts in /root.
+	// No ssh_shell here on purpose: this test is about the file tools, and the
+	// "~" listing below checks this path rather than taking it on faith.
+	home := "/" + sshUser
+	const name = "e2e-tilde.txt"
+	const body = "home sweet home\n"
+
+	if _, err := mc.Call(ctx, "ssh_file_write", map[string]any{
+		"host": "testhost", "path": "~/" + name, "data": body,
+	}); err != nil {
+		t.Fatalf("file_write via ~: %v", err)
+	}
+
+	var st struct {
+		Name string `json:"name"`
+		Size int64  `json:"size"`
+	}
+	if err := mc.CallJSON(ctx, "ssh_file_stat", map[string]any{
+		"host": "testhost", "path": "~/" + name,
+	}, &st); err != nil {
+		t.Fatalf("file_stat via ~: %v", err)
+	}
+	if st.Name != name || st.Size != int64(len(body)) {
+		t.Fatalf("stat via ~ = %+v, want name %q size %d", st, name, len(body))
+	}
+
+	// "~", the absolute path and the SFTP session's own cwd (the same home)
+	// all list the file.
+	for _, p := range []string{"~", "~/", home, ".", "./"} {
+		var entries []struct {
+			Name string `json:"name"`
+		}
+		if err := mc.CallJSON(ctx, "ssh_file_list", map[string]any{
+			"host": "testhost", "path": p,
+		}, &entries); err != nil {
+			t.Fatalf("file_list %q: %v", p, err)
+		}
+		found := false
+		for _, e := range entries {
+			if e.Name == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("file_list %q did not show %s", p, name)
+		}
+	}
+
+	// Read through "~", edit through the absolute path.
+	var rd fileRead
+	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+		"host": "testhost", "path": "~/" + name,
+	}, &rd); err != nil {
+		t.Fatalf("file_read via ~: %v", err)
+	}
+	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{
+		"host": "testhost", "path": home + "/" + name, "old_text": "sweet", "new_text": "bitter",
+	}); err != nil {
+		t.Fatalf("edit via the absolute spelling of a read made with ~: %v", err)
+	}
+
+	// And the other way round: read absolute, edit via "~".
+	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+		"host": "testhost", "path": home + "/" + name,
+	}, &rd); err != nil {
+		t.Fatalf("file_read absolute: %v", err)
+	}
+	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{
+		"host": "testhost", "path": "~/" + name, "old_text": "bitter", "new_text": "sweet",
+	}); err != nil {
+		t.Fatalf("edit via ~ of a read made absolute: %v", err)
+	}
+
+	// "~user" is not our home to resolve: it stays a literal path and fails
+	// as a path, not as a surprising success.
+	if _, err := mc.CallText(ctx, "ssh_file_stat", map[string]any{
+		"host": "testhost", "path": "~e2e-no-such-user/" + name,
+	}); err == nil {
+		t.Fatal("~user path resolved instead of staying literal")
+	}
+}
+
+// TestConcurrentFirstCallsShareOneDial pins the cold-start gate: the session
+// is published before its dial finishes, so parallel first calls must wait for
+// it — none may fail with "session is connecting" — and the host must end up
+// with exactly one connection.
+func TestConcurrentFirstCallsShareOneDial(t *testing.T) {
+	t.Parallel()
+	_, _, d, teardown := setupDaemon(t)
+	defer teardown()
+
+	// setupDaemon exposes the host over /api and never dials: still cold.
+	const callers = 6
+	clients := make([]*mcptest.Client, callers)
+	for i := range clients {
+		clients[i] = mcptest.New(t, d.Addr())
+	}
+	defer func() {
+		for _, c := range clients {
+			c.Close()
+		}
+	}()
+
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	start := make(chan struct{})
+	for i := range clients {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			_, errs[i] = clients[i].CallTool(ctx, "ssh_file_list", map[string]any{
+				"host": "testhost", "path": "/",
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("parallel first call %d: %v", i, err)
+		}
+	}
+
+	var sess []struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if code := apiJSON(t, d, "GET", "/sessions", nil, &sess); code != 200 {
+		t.Fatalf("GET /api/sessions = %d", code)
+	}
+	if len(sess) != 1 {
+		t.Fatalf("%d sessions after %d parallel first calls, want 1: %+v", len(sess), callers, sess)
+	}
+	if sess[0].State != "connected" {
+		t.Fatalf("session state = %q, want connected", sess[0].State)
+	}
+}
+
 // --- state file hygiene --------------------------------------------------------
 
 func TestStateFileHasNoSessions(t *testing.T) {
+	t.Parallel()
 	mc, _, d, _ := setupDaemon(t)
 
 	run(t, mc, "testhost", "echo x")

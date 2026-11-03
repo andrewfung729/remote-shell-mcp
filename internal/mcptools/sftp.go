@@ -7,6 +7,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/jaenster/remote-shell-mcp/internal/sshx"
 )
 
 // This file is the file half of the agent surface. Four of the six operations
@@ -16,24 +18,33 @@ import (
 // write, exactly-once edit) — plus the bulk transfer pair that keeps bytes out
 // of the model context.
 
+// Path arguments share one documented syntax. Agents write "~" and expect it
+// to mean the remote home, so the daemon resolves it (SFTP itself expands
+// nothing); a relative path starts at that same home, and an absolute path is
+// used as given. Local paths belong to the daemon's own filesystem.
+const (
+	remotePathDesc = "Remote path: absolute, relative to the remote home, or starting with ~ for that home."
+	localPathDesc  = "Path on the daemon's filesystem: absolute, relative to the daemon user's home, or starting with ~ for that home."
+)
+
 // RegisterSFTP registers the file tools.
 func RegisterSFTP(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_file_list",
 		mcp.WithDescription("List a directory on the remote host via SFTP."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 	), handleFileList(st))
 
 	srv.AddTool(mcp.NewTool("ssh_file_stat",
 		mcp.WithDescription("Stat a remote file."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 	), handleFileStat(st))
 
 	srv.AddTool(mcp.NewTool("ssh_file_read",
 		mcp.WithDescription("Read a remote text file as a window of lines. Up to 256 KiB (262144 bytes) of file per call: a larger file, or one that is not valid UTF-8, is an error — use ssh_download for those. start_line defaults to 1; max_lines omitted or 0 reads to the end of the file. Lines keep their endings (CRLF stays CRLF) so the data can be written back verbatim."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 		mcp.WithNumber("start_line", mcp.Description("First line of the window, 1-based (default 1).")),
 		mcp.WithNumber("max_lines", mcp.Description("How many lines to return (default: to the end of the file).")),
 	), handleFileRead(st))
@@ -41,7 +52,7 @@ func RegisterSFTP(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_file_write",
 		mcp.WithDescription("Write text to a remote file, truncating it unless append is set. At most 256 KiB (262144 bytes) of data per call — for anything larger or binary use ssh_upload."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 		mcp.WithString("data", mcp.Required(), mcp.Description("Text content to write (at most 262144 bytes).")),
 		mcp.WithBoolean("append", mcp.Description("Append rather than truncate the existing file (default false).")),
 	), handleFileWrite(st))
@@ -49,7 +60,7 @@ func RegisterSFTP(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_file_edit",
 		mcp.WithDescription("Replace text in a remote file in place. old_text must occur exactly once, byte for byte (CRLF included) — otherwise the call fails and changes nothing. Read the file with ssh_file_read first: an edit is refused when this daemon has no record of the file's content or when the file changed since that read. Both the file and the result must fit the 256 KiB (262144 bytes) inline budget. Returns the line the replacement starts on and the new line count."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 		mcp.WithString("old_text", mcp.Required(), mcp.Description("Exact text to replace; must occur exactly once.")),
 		mcp.WithString("new_text", mcp.Required(), mcp.Description("Replacement text; may be empty to delete.")),
 	), handleFileEdit(st))
@@ -57,15 +68,15 @@ func RegisterSFTP(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_upload",
 		mcp.WithDescription("Stream a local file OR directory (where the daemon runs) to the remote host via SFTP. Directories are mirrored recursively; intermediate dirs are created; file permissions are preserved best-effort; symlinks are skipped. This is the right tool for any non-trivial data transfer — it streams over the SSH channel without serializing bytes into the MCP message."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("local_path", mcp.Required(), mcp.Description("Path on the daemon's filesystem; can be a file or a directory.")),
-		mcp.WithString("remote_path", mcp.Required(), mcp.Description("Destination path on the remote host. When local_path is a directory, this becomes the remote root for the mirrored tree.")),
+		mcp.WithString("local_path", mcp.Required(), mcp.Description(localPathDesc+" File or directory.")),
+		mcp.WithString("remote_path", mcp.Required(), mcp.Description(remotePathDesc+" Destination. When local_path is a directory, this becomes the remote root for the mirrored tree.")),
 	), handleUpload(st))
 
 	srv.AddTool(mcp.NewTool("ssh_download",
 		mcp.WithDescription("Stream a remote file OR directory to the local filesystem (where the daemon runs) via SFTP. Directories are mirrored recursively; intermediate dirs are created; symlinks are skipped. Use this instead of ssh_file_read whenever the payload is binary, is not valid UTF-8, or is larger than 256 KiB."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
-		mcp.WithString("remote_path", mcp.Required(), mcp.Description("Path on the remote host; can be a file or a directory.")),
-		mcp.WithString("local_path", mcp.Required(), mcp.Description("Destination path on the daemon's filesystem. When remote_path is a directory, this becomes the local root for the mirrored tree.")),
+		mcp.WithString("remote_path", mcp.Required(), mcp.Description(remotePathDesc+" File or directory.")),
+		mcp.WithString("local_path", mcp.Required(), mcp.Description(localPathDesc+" Destination. When remote_path is a directory, this becomes the local root for the mirrored tree.")),
 	), handleDownload(st))
 }
 
@@ -78,11 +89,15 @@ func handleFileList(st *State) server.ToolHandlerFunc {
 		if err := checkExposed(st, host); err != nil {
 			return resultErr(err)
 		}
-		path, err := req.RequireString("path")
+		rawPath, err := req.RequireString("path")
 		if err != nil {
 			return resultErr(err)
 		}
-		s, err := dial(st, host)
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		path, err := remotePath(s, rawPath)
 		if err != nil {
 			return resultErr(err)
 		}
@@ -103,11 +118,15 @@ func handleFileStat(st *State) server.ToolHandlerFunc {
 		if err := checkExposed(st, host); err != nil {
 			return resultErr(err)
 		}
-		path, err := req.RequireString("path")
+		rawPath, err := req.RequireString("path")
 		if err != nil {
 			return resultErr(err)
 		}
-		s, err := dial(st, host)
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		path, err := remotePath(s, rawPath)
 		if err != nil {
 			return resultErr(err)
 		}
@@ -128,7 +147,7 @@ func handleFileRead(st *State) server.ToolHandlerFunc {
 		if err := checkExposed(st, host); err != nil {
 			return resultErr(err)
 		}
-		path, err := req.RequireString("path")
+		rawPath, err := req.RequireString("path")
 		if err != nil {
 			return resultErr(err)
 		}
@@ -136,7 +155,11 @@ func handleFileRead(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		s, err := dial(st, host)
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		path, err := remotePath(s, rawPath)
 		if err != nil {
 			return resultErr(err)
 		}
@@ -169,7 +192,7 @@ func handleFileWrite(st *State) server.ToolHandlerFunc {
 		if err := checkExposed(st, host); err != nil {
 			return resultErr(err)
 		}
-		path, err := req.RequireString("path")
+		rawPath, err := req.RequireString("path")
 		if err != nil {
 			return resultErr(err)
 		}
@@ -183,7 +206,11 @@ func handleFileWrite(st *State) server.ToolHandlerFunc {
 		if err := checkWriteBudget(len(data)); err != nil {
 			return resultErr(err)
 		}
-		s, err := dial(st, host)
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		path, err := remotePath(s, rawPath)
 		if err != nil {
 			return resultErr(err)
 		}
@@ -212,7 +239,7 @@ func handleFileEdit(st *State) server.ToolHandlerFunc {
 		if err := checkExposed(st, host); err != nil {
 			return resultErr(err)
 		}
-		path, err := req.RequireString("path")
+		rawPath, err := req.RequireString("path")
 		if err != nil {
 			return resultErr(err)
 		}
@@ -230,11 +257,19 @@ func handleFileEdit(st *State) server.ToolHandlerFunc {
 		client := caller(ctx)
 		// Read before edit: no record means this client has not seen the file
 		// in this daemon run, and editing blind is exactly the failure mode
-		// the guard exists to prevent. This fails before any dial.
-		if _, ok := st.Guard.Lookup(client, host, path); !ok {
-			return resultErr(errEditNeedsRead)
+		// the guard exists to prevent. A plain path is refused here, before any
+		// dial; a "~" path has to dial to know what it names, so its refusal
+		// comes from the Check below (still before any file I/O).
+		if !sshx.NeedsHome(rawPath) {
+			if _, ok := st.Guard.Lookup(client, host, rawPath); !ok {
+				return resultErr(errEditNeedsRead)
+			}
 		}
-		s, err := dial(st, host)
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		path, err := remotePath(s, rawPath)
 		if err != nil {
 			return resultErr(err)
 		}
@@ -291,7 +326,15 @@ func handleUpload(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		s, err := dial(st, host)
+		local, err = localPath(local)
+		if err != nil {
+			return resultErr(err)
+		}
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		remote, err = remotePath(s, remote)
 		if err != nil {
 			return resultErr(err)
 		}
@@ -320,7 +363,15 @@ func handleDownload(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		s, err := dial(st, host)
+		local, err = localPath(local)
+		if err != nil {
+			return resultErr(err)
+		}
+		s, err := dial(ctx, st, host)
+		if err != nil {
+			return resultErr(err)
+		}
+		remote, err = remotePath(s, remote)
 		if err != nil {
 			return resultErr(err)
 		}

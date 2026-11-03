@@ -16,7 +16,9 @@ surface: agents never create or name one — the session id *is* the host
 alias and the first call on an exposed host dials it transparently. A
 session has a state (connecting / connected / reconnecting /
 disconnected), a user, one or more addresses, and flags. It outlives any
-single MCP client — the whole point of the daemon.
+single MCP client — the whole point of the daemon. While it is *connecting*,
+parallel first calls on that host wait for the dial instead of seeing the
+half-built session — one connection, one outcome, never a transient error.
 
 ## shell
 

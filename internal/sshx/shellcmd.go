@@ -23,7 +23,7 @@ import (
 
 const (
 	// markerBody is the payload each post-command marker carries: exit
-	// code and cwd.  delimiters are never typed by a user.
+	// code and cwd. Its SOH/US delimiters are never typed by a user.
 	markerBody = "__RSM_<__<e:%d><c:%s>__>__RSM__"
 	markerSep  = "\x1f\x01__RSM_<__<e:" // pre-marker: noise before it is discarded
 	markerEnd  = "__>__RSM__"
@@ -38,14 +38,33 @@ const promptState = "PS1=''; PROMPT_COMMAND='printf \"\\x1f\\x01__RSM_<__<e:%d><
 
 // bootstrap is typed into bash after rc files load. It overrides prompt
 // hooks and PS1 so user rc can't interfere with the marker, disables
-// readline echo and bracketed paste, then prints a sentinel — everything
-// before the sentinel is rc/banner noise.
+// readline echo and bracketed paste, and lets the next prompt print the
+// marker. Everything before that first marker is rc/banner noise, discarded.
+//
+// No separate sentinel print: it would be a second marker right behind the
+// prompt's, and whichever arrives after a call has begun is digested as that
+// command's result — a spurious empty "done" that swallows the real output.
 const bootstrap = "unset PS2 PS3 PS4 PROMPT_COMMAND; bind 'set enable-bracketed-paste off' 2>/dev/null; stty -echo 2>/dev/null; " +
-	promptState + "; printf '\\x1f\\x01__RSM_<__<e:0><c:%s>__>__RSM__\\n' \"$PWD\"\n"
+	promptState + "\n"
 
-// bootstrapFallback is the bootstrap for bash --norc / sh (no `bind`).
+// promptStateSh is promptState for a POSIX sh: it has no PROMPT_COMMAND
+// (busybox ash, dash and toybox sh all lack the variable), but it does expand
+// PS1 at every prompt — command substitution included — so PS1 prints the
+// marker itself, carrying the status and cwd of the command that just
+// finished. Without this the sh shell never emits a marker at all, and every
+// command runs to its timeout and reports status "running".
+const promptStateSh = `PS1='$(printf "\x1f\x01__RSM_<__<e:%d><c:%s>__>__RSM__\n" "$?" "$PWD")'`
+
+// bootstrapFallback is the bootstrap for bash --norc / sh (no `bind`). The
+// marker mechanism depends on the shell: bash prints it from PROMPT_COMMAND,
+// but a PS1-based marker would go through readline, which eats the SOH byte in
+// the marker prefix as a prompt delimiter — so only the POSIX-sh branch may
+// use PS1. There is no separate sentinel print either: it would be a second marker
+// right behind the prompt's, and whichever arrives after a call has begun is
+// digested as that command's result (an empty "done" that swallows the real
+// output).
 const bootstrapFallback = "unset PS2 PS3 PS4 PROMPT_COMMAND; stty -echo 2>/dev/null; " +
-	promptState + "; printf '\\x1f\\x01__RSM_<__<e:0><c:%s>__>__RSM__\\n' \"$PWD\"\n"
+	"if [ -n \"$BASH_VERSION\" ]; then " + promptState + "; else " + promptStateSh + "; fi\n"
 
 // initScript runs in the channel's initial sh: exec interactive login bash
 // so rc files load (nvm/conda/pyenv land on PATH).
@@ -65,6 +84,10 @@ const maxMarkerWait = 10 * time.Second
 
 var errDegradedRetry = errors.New("remote shell init produced no marker within 10s")
 
+// errShellGone means the shell's PTY ended before it printed a marker — the
+// usual cause is `exec bash` on a host that has no bash.
+var errShellGone = errors.New("remote shell exited before printing a marker")
+
 // ErrShellBusy means a command is still running on this shell.
 var ErrShellBusy = errors.New("shell busy: a command is still running — use poll for output, input to feed it, or interrupt to stop it")
 
@@ -81,10 +104,11 @@ type Shell struct {
 	stdin   io.Writer
 	writeMu sync.Mutex
 
-	mu     sync.Mutex
-	out    *shellReader
-	closed bool
-	doneCh chan struct{}
+	mu       sync.Mutex
+	out      *shellReader
+	closed   bool
+	exitCode int // remote exit status; -1 when unknown (signal/X11-less tty hiccup)
+	doneCh   chan struct{}
 }
 
 // openShellOn opens channel+PTY on the session's current transport and
@@ -134,12 +158,32 @@ func (sess *Session) openShellOn(name, owner, script string) (*Shell, error) {
 		doneCh:   make(chan struct{}),
 		OpenedAt: time.Now(),
 	}
-	go sh.pump(stdout)
-	go sh.pump(stderr)
+	// Two streams feed one reader, so "the PTY is gone" must mean BOTH are
+	// drained: closing on whichever stream sees EOF first would drop output
+	// still in flight on the other (it strands a command that ends the shell).
+	var pumps sync.WaitGroup
+	pumps.Add(2)
+	go func() { defer pumps.Done(); sh.pump(stdout) }()
+	go func() { defer pumps.Done(); sh.pump(stderr) }()
 	go func() {
-		_ = chSess.Wait()
+		pumps.Wait()
+		sh.out.close()
+	}()
+	go func() {
+		err := chSess.Wait()
+		code := 0
+		var exitErr *ssh.ExitError
+		switch {
+		case err == nil:
+			code = 0
+		case errors.As(err, &exitErr):
+			code = exitErr.ExitStatus()
+		default:
+			code = -1 // transport gone or killed: no meaningful status
+		}
 		sh.mu.Lock()
 		sh.closed = true
+		sh.exitCode = code
 		sh.mu.Unlock()
 		select {
 		case <-sh.doneCh:
@@ -169,7 +213,9 @@ func (sess *Session) OpenShell(name, owner string) (*Shell, error) {
 	sh.Kind = kindBashRC
 	if err := sh.out.waitFirstMarker(maxMarkerWait); err != nil {
 		_ = sh.Close()
-		return nil, errDegradedRetry
+		// Both flavours fall back to the degraded shell: a dead PTY (no bash)
+		// or rc files that never come back.
+		return nil, fmt.Errorf("%w: %v", errDegradedRetry, err)
 	}
 	return sh, nil
 }
@@ -194,43 +240,64 @@ func (sess *Session) openDegraded(name, owner string) (*Shell, error) {
 	return sh, nil
 }
 
+// liveShell returns the named shell when it exists, is alive and is owned by
+// owner. A dead shell is dropped so the caller can respawn it; a foreign
+// owner's shell is an error — a second client on a shared session must not
+// drive it.
+func (sess *Session) liveShell(name, owner string) (*Shell, error) {
+	sess.shellsMu.Lock()
+	defer sess.shellsMu.Unlock()
+	sh, ok := sess.shells[name]
+	if !ok {
+		return nil, nil
+	}
+	if sh.isClosed() {
+		delete(sess.shells, name)
+		_ = sh.Close()
+		return nil, nil
+	}
+	if sh.Owner != owner {
+		return nil, fmt.Errorf("shell %q not found on session %q", name, sess.ID)
+	}
+	return sh, nil
+}
+
 // OpenOrRespawn returns the named shell owned by owner, opening it if it
 // doesn't exist or its PTY died. Second return = respawn (shell_restarted).
 func (sess *Session) OpenOrRespawn(name, owner string) (*Shell, bool, error) {
-	sess.shellsMu.Lock()
 	if sess.closed.Load() {
-		sess.shellsMu.Unlock()
 		return nil, false, fmt.Errorf("session %q is closed", sess.ID)
 	}
-	if sh, ok := sess.shells[name]; ok {
-		dead := sh.isClosed()
-		if !dead {
-			if sh.Owner != owner {
-				sess.shellsMu.Unlock()
-				return nil, false, fmt.Errorf("shell %q not found on session %q", name, sess.ID)
-			}
-			sess.shellsMu.Unlock()
-			return sh, false, nil
-		}
-		delete(sess.shells, name)
-		_ = sh.Close()
+	if sh, err := sess.liveShell(name, owner); sh != nil || err != nil {
+		return sh, false, err
 	}
-	sess.shellsMu.Unlock()
 
+	// Opening is serialized per session and re-checked under the lock: two
+	// concurrent first calls would otherwise each open a shell, the second
+	// registration would silently drop the first (a leaked PTY), and the
+	// second caller would miss the first one's "shell busy".
+	sess.openMu.Lock()
+	defer sess.openMu.Unlock()
+	if sh, err := sess.liveShell(name, owner); sh != nil || err != nil {
+		return sh, false, err
+	}
+
+	// Login bash first, then a shell that skips rc entirely (no bash on the
+	// host, or rc files that never come back).
 	sh, err := sess.OpenShell(name, owner)
-	if err != nil {
-		if errors.Is(err, errDegradedRetry) {
-			sh, derr := sess.openDegraded(name, owner)
-			if derr != nil {
-				return nil, false, derr
-			}
-			sess.registerShell(name, sh)
-			return sh, true, nil
-		}
+	if err == nil {
+		sess.registerShell(name, sh)
+		return sh, true, nil
+	}
+	if !errors.Is(err, errDegradedRetry) {
 		return nil, false, err
 	}
-	sess.registerShell(name, sh)
-	return sh, true, nil
+	deg, derr := sess.openDegraded(name, owner)
+	if derr != nil {
+		return nil, false, derr
+	}
+	sess.registerShell(name, deg)
+	return deg, true, nil
 }
 
 // DropShell removes and closes the named shell if the caller owns it —
@@ -260,6 +327,8 @@ func (sh *Shell) writeBytes(b []byte) (int, error) {
 	return sh.stdin.Write(b)
 }
 
+// pump copies one remote stream into the shell reader until it ends. It does
+// not close the reader — openShellOn does that once both streams are drained.
 func (sh *Shell) pump(r io.Reader) {
 	buf := make([]byte, 4096)
 	for {
@@ -270,7 +339,6 @@ func (sh *Shell) pump(r io.Reader) {
 			sh.out.feed(chunk)
 		}
 		if err != nil {
-			sh.out.close()
 			return
 		}
 	}
@@ -300,6 +368,34 @@ func (sh *Shell) isClosed() bool {
 	return sh.closed
 }
 
+// exitStatus is the remote shell's own exit status, valid once it has closed.
+func (sh *Shell) exitStatus() int {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	return sh.exitCode
+}
+
+// exitWait bounds how long a caller waits for a dead shell to be reaped before
+// its exit status is reported — the pump sees EOF before Wait returns.
+const exitWait = 2 * time.Second
+
+// waitExit blocks until the remote shell process has been reaped.
+func (sh *Shell) waitExit(d time.Duration) {
+	select {
+	case <-sh.doneCh:
+	case <-time.After(d):
+	}
+}
+
+// exitCodePtr turns an exit status into the *int the result wants; unknown
+// (-1, transport gone or killed by a signal) stays nil.
+func exitCodePtr(code int) *int {
+	if code < 0 {
+		return nil
+	}
+	return &code
+}
+
 // RunResult is what one ssh_shell call produces.
 type RunResult struct {
 	Output    string `json:"output"`
@@ -324,7 +420,15 @@ func (sh *Shell) Run(cmd string, timeout time.Duration) (*RunResult, error) {
 	}
 	res, done := sh.out.collect(timeout)
 	if !done {
-		return &RunResult{Output: res.Output, Status: "running", Truncated: res.Truncated}, nil
+		if !sh.out.ptyGone() {
+			return &RunResult{Output: res.Output, Status: "running", Truncated: res.Truncated}, nil
+		}
+		// The command ended the shell (`exit 7`, `exec …`) — no marker will
+		// ever arrive. Report the shell's own exit status and the cwd it was
+		// last in, instead of burning the caller's whole timeout. The next call
+		// finds the dead shell and respawns it (`shell_restarted`).
+		sh.waitExit(exitWait)
+		res.ExitCode = exitCodePtr(sh.exitStatus())
 	}
 	res.Status = "done"
 	return res, nil
@@ -336,6 +440,11 @@ func (sh *Shell) Poll(timeout time.Duration) (*RunResult, error) {
 		return nil, errors.New("shell is closed")
 	}
 	res, done := sh.out.collect(timeout)
+	if !done && sh.out.ptyGone() {
+		sh.waitExit(exitWait)
+		res.ExitCode = exitCodePtr(sh.exitStatus())
+		done = true
+	}
 	res.Status = "done"
 	if !done {
 		res.Status = "running"
@@ -369,6 +478,8 @@ type shellReader struct {
 	fullOut  []byte // raw bytes of the in-flight command's output
 	lastRes  *RunResult
 	gotFirst bool
+	lastCWD  string // cwd from the most recent marker
+	closed   bool   // the PTY ended: no further marker can arrive
 }
 
 func newShellReader() *shellReader {
@@ -385,10 +496,21 @@ func (r *shellReader) feed(b []byte) {
 	r.mu.Unlock()
 }
 
+// close marks the PTY as gone. Waiters must stop waiting for a marker
+// instead of sitting out their whole timeout: a command that kills the shell
+// (`exit 7`) never prints one.
 func (r *shellReader) close() {
 	r.mu.Lock()
+	r.closed = true
 	r.cond.Broadcast()
 	r.mu.Unlock()
+}
+
+// ptyGone reports whether the shell's PTY ended under the running command.
+func (r *shellReader) ptyGone() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
 }
 
 // digestLocked splits buf at every complete marker. Text before a marker is
@@ -413,6 +535,7 @@ func (r *shellReader) digestLocked() {
 		}
 		exitStr := string(r.buf[loc[2]:loc[3]])
 		cwd := string(r.buf[loc[4]:loc[5]])
+		r.lastCWD = cwd
 		r.buf = r.buf[loc[1]:]
 		if !r.gotFirst {
 			r.gotFirst = true
@@ -458,6 +581,12 @@ func (r *shellReader) waitFirstMarker(d time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for !r.gotFirst {
+		if r.closed {
+			// The initial shell died before its first marker — typically
+			// `exec bash` on a host without bash. Report it now instead of
+			// waiting out the full timeout: the caller falls back immediately.
+			return errShellGone
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return errors.New("no marker within timeout")
@@ -508,6 +637,12 @@ func (r *shellReader) collect(d time.Duration) (*RunResult, bool) {
 		if !r.running && len(r.buf) == 0 {
 			break
 		}
+		if r.closed {
+			// The shell died under the command: no marker is coming. Not
+			// "done" in the marker sense — the caller checks ptyGone() and
+			// reports the shell's own exit status.
+			return r.partialLocked(), false
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return r.partialLocked(), false
@@ -524,7 +659,7 @@ func (r *shellReader) collect(d time.Duration) (*RunResult, bool) {
 
 func (r *shellReader) partialLocked() *RunResult {
 	out := cleanOutput(r.fullOut)
-	res := &RunResult{}
+	res := &RunResult{CWD: r.lastCWD}
 	if len(out) > maxOutputChars {
 		res.Output = headTail(out, maxOutputChars)
 		res.Truncated = true

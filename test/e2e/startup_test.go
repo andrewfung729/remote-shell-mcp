@@ -20,6 +20,7 @@ import (
 // show: the daemon mints a token, prints it on stdout — nowhere else — and the
 // printed value authorizes /api exactly once.
 func TestDaemonPrintsWebUIToken(t *testing.T) {
+	t.Parallel()
 	daemonBin := BuildDaemon(t)
 	d := StartDaemon(t, daemonBin)
 	t.Cleanup(d.Stop)
@@ -59,6 +60,7 @@ func runDaemonExpectExit(t *testing.T, daemonBin string, args ...string) (int, s
 }
 
 func TestNonLoopbackAddrRejected(t *testing.T) {
+	t.Parallel()
 	daemonBin := BuildDaemon(t)
 	code, out := runDaemonExpectExit(t, daemonBin,
 		"-addr", "0.0.0.0:47499", "-state", t.TempDir()+"/s.json",
@@ -72,6 +74,7 @@ func TestNonLoopbackAddrRejected(t *testing.T) {
 }
 
 func TestPortConflictExitsNonZero(t *testing.T) {
+	t.Parallel()
 	daemonBin := BuildDaemon(t)
 	d1 := StartDaemon(t, daemonBin) // holds its port
 	t.Cleanup(d1.Stop)

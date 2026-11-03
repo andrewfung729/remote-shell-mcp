@@ -33,8 +33,10 @@ output via `poll`). A second `command` while one runs fails with
 shell; there is no open/close/list/resize tool.
 
 **Transparent sessions.** The session concept is hidden from agents: the
-session id *is* the host alias, the first call dials automatically
-(keepalive + auto-reconnect always on, strict known_hosts, no
+session id *is* the host alias, the first call dials automatically — and a
+call that arrives while that dial is still running waits for it, so parallel
+first calls on a cold host share one connection instead of seeing a
+half-built session (keepalive + auto-reconnect always on, strict known_hosts, no
 `insecure`), and reconnect yields `shell_restarted: true` on the next
 call. The `persistent` flag, rehydration and `insecure` are deleted —
 the state file holds only the exposure list and disabled tools.
@@ -43,8 +45,14 @@ the state file holds only the exposure list and disabled tools.
 conda, pyenv) land on PATH; a bootstrap then overrides the prompt and
 disables echo/bracketed-paste so user rc cannot corrupt completion
 detection, which is a marker carrying exit code + cwd. If the first marker
-does not arrive within 10 s the shell respawns on a minimal
-`bash --norc` (or `sh`) and reports `shell_degraded`.
+does not arrive within 10 s — or the initial shell dies outright, which is
+what `exec bash` does on a host without bash — the shell respawns on a minimal
+`bash --norc` (or `sh`) and reports `shell_degraded`. The fallback picks its
+marker mechanism per shell: `PROMPT_COMMAND` for bash, a `PS1` command
+substitution for a POSIX sh, which has no `PROMPT_COMMAND`. A command that
+ends the shell (`exit 7`, `exec …`) reports `status: done` with the
+shell's own exit status instead of waiting out `timeout_ms`; the next call
+respawns it and sets `shell_restarted`.
 
 **Enforced exposure.** Every tool rejects a non-exposed host with
 `host not exposed`, without revealing whether the alias exists in ssh

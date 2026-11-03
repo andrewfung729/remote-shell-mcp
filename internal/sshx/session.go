@@ -34,9 +34,21 @@ type Session struct {
 
 	shellsMu sync.Mutex
 	shells   map[string]*Shell // keyed by shell name
+	openMu   sync.Mutex        // serializes opening a shell (one PTY per name)
 
 	sftpMu sync.Mutex
 	sftp   *sftp.Client
+
+	homeMu sync.Mutex
+	home   string // remote home dir, resolved lazily by HomeDir
+
+	// ready is closed when the first dial settles — success or failure — and
+	// connectErr carries that outcome. A caller that finds the session in the
+	// manager's map while it is still dialing waits on ready instead of
+	// failing with "session is connecting".
+	ready      chan struct{}
+	settled    bool
+	connectErr error
 
 	reconnectMu sync.Mutex // serializes attemptReconnect and Reconnect
 
@@ -77,6 +89,39 @@ func (s *Session) setClient(c *ssh.Client, jumps []*ssh.Client, addr string) boo
 	return true
 }
 
+// settle publishes the outcome of the first dial to everyone waiting on it.
+// Only the goroutine that dialed calls it, at most once; later calls are
+// no-ops so a doubly-reached error path cannot panic on a closed channel.
+func (s *Session) settle(err error) {
+	s.mu.Lock()
+	if s.settled {
+		s.mu.Unlock()
+		return
+	}
+	s.settled = true
+	s.connectErr = err
+	close(s.ready)
+	s.mu.Unlock()
+}
+
+// waitReady blocks until the first dial has settled and returns its outcome.
+// This is what makes a cold host's parallel first calls share one connection:
+// they queue here instead of racing a half-built session.
+func (s *Session) waitReady(ctx context.Context) (*Session, error) {
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("connect to %q: %w", s.ID, ctx.Err())
+	}
+	s.mu.RLock()
+	err := s.connectErr
+	s.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (s *Session) markState(state SessionState, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,6 +146,12 @@ func (s *Session) clearClient() {
 	s.jumpClients = nil
 	s.mu.Unlock()
 	s.sftpMu.Unlock()
+
+	// The home dir rode on the old transport: forget it, so the next SFTP
+	// client asks the new one (which may be a different machine).
+	s.homeMu.Lock()
+	s.home = ""
+	s.homeMu.Unlock()
 
 	if sft != nil {
 		_ = sft.Close()

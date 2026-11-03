@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -25,10 +27,27 @@ import (
 )
 
 const (
-	imageTag       = "remote-shell-mcp-test-sshd:latest"
 	containerLabel = "remote-shell-mcp-e2e=1"
 	sshUser        = "root"
 )
+
+// sshdImageTag names a fixture image by the content of its Dockerfile, so a
+// changed fixture rebuilds instead of silently reusing an image cached from an
+// older revision. Two variants exist: the default (bash installed — the shell
+// layer's primary path) and the "-nobash" one that pins the degraded fallback.
+func sshdImageTag(t *testing.T, withBash bool) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(RepoRoot(t), "test", "e2e", "Dockerfile.sshd"))
+	if err != nil {
+		t.Fatalf("read Dockerfile.sshd: %v", err)
+	}
+	sum := sha256.Sum256(data)
+	tag := "remote-shell-mcp-test-sshd:" + hex.EncodeToString(sum[:4])
+	if !withBash {
+		tag += "-nobash"
+	}
+	return tag
+}
 
 func RepoRoot(t *testing.T) string {
 	t.Helper()
@@ -68,22 +87,54 @@ func BuildDaemon(t *testing.T) string {
 	return builtBin
 }
 
+var (
+	imageOnce sync.Once
+	imageErr  error
+)
+
+// EnsureDockerImage builds both sshd fixtures once per run. The once matters
+// under t.Parallel: without it two tests that start together both miss the
+// inspect check and race docker build on the same tag.
 func EnsureDockerImage(t *testing.T) {
 	t.Helper()
+	imageOnce.Do(func() {
+		for _, withBash := range []bool{true, false} {
+			if err := buildSSHDImage(t, withBash); err != nil {
+				imageErr = err
+				return
+			}
+		}
+	})
+	if imageErr != nil {
+		t.Fatalf("%v", imageErr)
+	}
+}
+
+func buildSSHDImage(t *testing.T, withBash bool) error {
+	t.Helper()
+	tag := sshdImageTag(t, withBash)
 	// Exit code is authoritative; the previous "string contains Error" check
 	// false-matched on legitimate JSON whose labels/env happened to contain
 	// the substring.
-	if err := exec.Command("docker", "image", "inspect", imageTag).Run(); err == nil {
-		return
+	if err := exec.Command("docker", "image", "inspect", tag).Run(); err == nil {
+		return nil
 	}
 	root := RepoRoot(t)
 	ctx := filepath.Join(root, "test", "e2e")
-	cmd := exec.Command("docker", "build", "-t", imageTag, "-f", filepath.Join(ctx, "Dockerfile.sshd"), ctx)
+	withBashArg := "0"
+	if withBash {
+		withBashArg = "1"
+	}
+	cmd := exec.Command("docker", "build",
+		"--build-arg", "WITH_BASH="+withBashArg,
+		"-t", tag,
+		"-f", filepath.Join(ctx, "Dockerfile.sshd"), ctx)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("docker build: %v", err)
+		return fmt.Errorf("docker build %s: %w", tag, err)
 	}
+	return nil
 }
 
 var (
@@ -188,7 +239,12 @@ func hostBlock(t *testing.T, alias string, port int) string {
 }
 
 // SweepStaleContainers removes any leftover containers from previous failed
-// runs of this suite. Invoked from setupSession-style helpers to keep CI clean.
+// runs of this suite.
+//
+// It must only be called before the suite starts parallel tests: it removes
+// EVERY container carrying the label, which under t.Parallel would kill the
+// containers of tests running alongside the caller. Nothing calls it today —
+// keep it that way, or call it from a package-level TestMain before m.Run.
 func SweepStaleContainers() {
 	for _, label := range []string{containerLabel, "remote-shell-mcp-e2e-lifecycle=1"} {
 		ids, err := exec.Command("docker", "ps", "-aq", "--filter", "label="+label).Output()
@@ -214,11 +270,23 @@ type SSHDContainer struct {
 // to a key that no longer exists on the next run.
 func StartSSHDContainer(t *testing.T) *SSHDContainer {
 	t.Helper()
+	return startSSHDContainer(t, true)
+}
+
+// StartSSHDContainerNoBash starts the fixture a minimal host looks like: no
+// bash, so the shell layer has to fall back to a POSIX sh.
+func StartSSHDContainerNoBash(t *testing.T) *SSHDContainer {
+	t.Helper()
+	return startSSHDContainer(t, false)
+}
+
+func startSSHDContainer(t *testing.T, withBash bool) *SSHDContainer {
+	t.Helper()
 	_, pub := SuiteKey(t)
 	args := []string{"run", "-d", "--rm",
 		"--label", containerLabel,
 		"-p", "127.0.0.1::22",
-		imageTag,
+		sshdImageTag(t, withBash),
 	}
 	out, err := exec.Command("docker", args...).Output()
 	if err != nil {
@@ -331,7 +399,31 @@ func StartDaemon(t *testing.T, daemonBin string) *Daemon {
 	return StartDaemonWith(t, daemonBin, DaemonOpts{})
 }
 
+// StartDaemonWith starts a daemon and waits for its HTTP surface.
+//
+// With no explicit Addr the port is picked from a free one and only then
+// bound — a race two parallel tests can lose: the winner's daemon takes the
+// port and the loser's exits non-zero. Retry on a fresh port instead of
+// failing the test; an explicit Addr is the caller's own choice, not retried.
 func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
+	t.Helper()
+	attempts := 5
+	if opts.Addr != "" {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		d, err := startDaemonOnce(t, daemonBin, opts)
+		if err == nil {
+			return d
+		}
+		lastErr = err
+	}
+	t.Fatalf("start daemon: %v", lastErr)
+	return nil
+}
+
+func startDaemonOnce(t *testing.T, daemonBin string, opts DaemonOpts) (*Daemon, error) {
 	t.Helper()
 	addr := opts.Addr
 	if addr == "" {
@@ -362,16 +454,15 @@ func StartDaemonWith(t *testing.T, daemonBin string, opts DaemonOpts) *Daemon {
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
-		t.Fatalf("start daemon: %v", err)
+		return nil, err
 	}
 	d := &Daemon{cmd: cmd, addr: addr, handlePath: opts.HandlePath, statePath: opts.StatePath, stop: cancel, stderr: &stderr, stdout: &stdout}
 	if err := waitForHTTP(addr); err != nil {
-		t.Logf("daemon stderr:\n%s", stderr.String())
 		d.Stop()
-		t.Fatalf("daemon never came up: %v", err)
+		return nil, fmt.Errorf("%s never came up: %w; stderr:\n%s", addr, err, stderr.String())
 	}
 	d.token = scrapeToken(stdout.String())
-	return d
+	return d, nil
 }
 
 // syncBuffer is a bytes.Buffer safe for concurrent use. exec.Cmd writes to

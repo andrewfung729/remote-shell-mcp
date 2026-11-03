@@ -6,15 +6,22 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
+
+// dialFunc is the connect seam: dialFinal in production, a fake in tests that
+// check the concurrency of a cold start without an sshd.
+type dialFunc func(spec ConnectSpec) (client *ssh.Client, jumps []*ssh.Client, addr string, err error)
 
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	dial     dialFunc
 }
 
 func NewManager() *Manager {
-	return &Manager{sessions: map[string]*Session{}}
+	return &Manager{sessions: map[string]*Session{}, dial: dialFinal}
 }
 
 // ErrNoSSHConfigEntry is returned when the host alias matches no concrete
@@ -28,16 +35,23 @@ var ErrNoSSHConfigEntry = errNoSSHConfigEntry
 // resolves from the daemon user's ~/.ssh/config, like the `ssh` CLI.
 // Keepalive (30s) and auto-reconnect are always on; host-key verification
 // is always strict against ~/.ssh/known_hosts.
-func (m *Manager) Connect(host string) (*Session, error) {
+// A second caller that arrives while the first dial is still in flight waits
+// for it (bounded by ctx) and gets the same session or the same error — a cold
+// host's parallel first calls share one connection instead of failing with
+// "session is connecting".
+func (m *Manager) Connect(ctx context.Context, host string) (*Session, error) {
 	if host == "" {
 		return nil, errors.New("host is required")
 	}
-	m.mu.RLock()
-	if existing, ok := m.sessions[host]; ok {
-		m.mu.RUnlock()
-		return existing, nil
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	m.mu.RLock()
+	existing, ok := m.sessions[host]
 	m.mu.RUnlock()
+	if ok {
+		return existing.waitReady(ctx)
+	}
 
 	if !hasConfigEntry(host) {
 		return nil, errNoSSHConfigEntry
@@ -57,37 +71,49 @@ func (m *Manager) Connect(host string) (*Session, error) {
 	m.mu.Lock()
 	if existing, exists := m.sessions[id]; exists {
 		m.mu.Unlock()
-		return existing, nil
+		return existing.waitReady(ctx)
 	}
 	sess := &Session{
 		ID:     id,
 		Spec:   spec,
 		state:  StateConnecting,
 		shells: map[string]*Shell{},
+		ready:  make(chan struct{}),
 	}
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
-	client, jumps, addr, err := dialFinal(spec)
+	// From here the session is visible to parallel callers, which wait on
+	// ready — so every path out of this function must settle it.
+	client, jumps, addr, err := m.dial(spec)
 	if err != nil {
-		m.mu.Lock()
-		delete(m.sessions, id)
-		m.mu.Unlock()
+		m.deleteIf(id, sess)
+		sess.settle(err)
 		return nil, err
 	}
 	if !sess.setClient(client, jumps, addr) {
 		// Session was disconnected mid-dial. setClient already closed the
 		// new connection — clean up the map entry if it's still there.
-		m.mu.Lock()
-		if existing, ok := m.sessions[id]; ok && existing == sess {
-			delete(m.sessions, id)
-		}
-		m.mu.Unlock()
-		return nil, errors.New("session was disconnected during connect")
+		m.deleteIf(id, sess)
+		lost := errors.New("session was disconnected during connect")
+		sess.settle(lost)
+		return nil, lost
 	}
 
 	sess.startKeepalive()
+	sess.settle(nil)
 	return sess, nil
+}
+
+// deleteIf drops the map entry only when it is still this session — a
+// concurrent Disconnect (or a later Connect for the same alias) may already
+// have replaced or removed it.
+func (m *Manager) deleteIf(id string, sess *Session) {
+	m.mu.Lock()
+	if existing, ok := m.sessions[id]; ok && existing == sess {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) Get(id string) (*Session, error) {
@@ -124,7 +150,7 @@ func (m *Manager) Reconnect(id string) (*Session, error) {
 	s.clearClient()
 	s.markState(StateReconnecting, nil)
 
-	client, jumps, addr, err := dialFinal(s.Spec)
+	client, jumps, addr, err := m.dial(s.Spec)
 	if err != nil {
 		s.markState(StateDisconnected, err)
 		return nil, err

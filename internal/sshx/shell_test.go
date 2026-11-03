@@ -5,6 +5,7 @@ package sshx
 // pure helpers of the command-execution layer (issue #14).
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,59 @@ func TestMarkerParsing(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "hello output") {
 		t.Fatalf("output %q", res.Output)
+	}
+}
+
+// TestCollectStopsWhenPTYGone pins the "command took the shell with it" path:
+// the PTY ending must end the wait immediately — not sit out the timeout — and
+// the bytes already captured must survive, with the cwd from the last marker.
+func TestCollectStopsWhenPTYGone(t *testing.T) {
+	r := newShellReader()
+	r.feed([]byte(bs)) // bootstrap sentinel: cwd "/"
+	r.beginRun()
+	r.feed([]byte("half a line and then the shell died\n"))
+	r.close()
+
+	start := time.Now()
+	res, done := r.collect(5 * time.Second)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("collect waited %s after the PTY was gone", elapsed)
+	}
+	if done {
+		t.Fatal("collect reported done: it must let the caller supply the exit status")
+	}
+	if !strings.Contains(res.Output, "half a line") {
+		t.Fatalf("output lost when the PTY died: %q", res.Output)
+	}
+	if res.CWD != "/" {
+		t.Fatalf("cwd %q, want the last marker's cwd", res.CWD)
+	}
+}
+
+// TestWaitFirstMarkerBailsOnDeadPTY pins the fast fallback on a host without
+// bash: the initial shell exits before any marker, and waiting the full 10s
+// would make every cold shell slow.
+func TestWaitFirstMarkerBailsOnDeadPTY(t *testing.T) {
+	r := newShellReader()
+	r.close()
+	if err := r.waitFirstMarker(5 * time.Second); !errors.Is(err, errShellGone) {
+		t.Fatalf("waitFirstMarker = %v, want errShellGone", err)
+	}
+}
+
+// TestFallbackBootstrapIsSohFreeForPS1 checks the shell-side contract that is
+// easy to break: readline eats  in a PS1-expanded prompt, so the marker for
+// a POSIX sh must come from PS1 without that byte, while bash uses
+// PROMPT_COMMAND.
+func TestFallbackBootstrapIsSohFreeForPS1(t *testing.T) {
+	if !strings.Contains(bootstrapFallback, "BASH_VERSION") {
+		t.Fatal("fallback bootstrap must pick PROMPT_COMMAND for bash and PS1 for sh")
+	}
+	if strings.Contains(promptStateSh, "\x01") {
+		t.Fatalf("PS1 marker must not carry \x01 (readline strips it): %s", promptStateSh)
+	}
+	if !strings.Contains(promptStateSh, "PROMPT_COMMAND") && strings.Contains(promptStateSh, "$?") == false {
+		t.Fatalf("PS1 marker does not carry the exit status: %s", promptStateSh)
 	}
 }
 
