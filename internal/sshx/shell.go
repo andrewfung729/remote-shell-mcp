@@ -53,6 +53,7 @@ func (sh *Shell) activity() (time.Time, bool) {
 func (s *Session) closeAllShells() {
 	s.shellsMu.Lock()
 	for id, sh := range s.shells {
+		s.noteShellLost(id)
 		_ = sh.Close()
 		delete(s.shells, id)
 	}

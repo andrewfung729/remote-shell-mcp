@@ -70,6 +70,7 @@ func (s *Session) reapIdle(now time.Time) {
 		if len(shellsToReap([]shellSnap{{name: name, last: last, busy: busy}}, now, shellIdleTTL)) == 0 {
 			continue
 		}
+		s.noteShellLost(name)
 		delete(s.shells, name)
 		_ = sh.Close()
 	}

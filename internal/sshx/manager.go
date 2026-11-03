@@ -19,6 +19,9 @@ type Manager struct {
 	sessions map[string]*Session
 	failures map[string]ConnectFailure // last failed dial per alias; not a negative cache
 	dial     dialFunc
+
+	lostMu sync.Mutex
+	lost   map[string]map[string]struct{} // host -> shell names whose next open lost cwd/env
 }
 
 func NewManager() *Manager {
@@ -85,6 +88,8 @@ func (m *Manager) Connect(ctx context.Context, host string) (*Session, error) {
 		shells: map[string]*Shell{},
 		ready:  make(chan struct{}),
 	}
+	sess.markLost = func(name string) { m.markShellLost(id, name) }
+	sess.takeLost = func(name string) bool { return m.takeShellLost(id, name) }
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
@@ -153,6 +158,44 @@ func (m *Manager) LastConnectFailure(host string) (ConnectFailure, bool) {
 	defer m.mu.RUnlock()
 	f, ok := m.failures[host]
 	return f, ok
+}
+
+// markShellLost remembers that host's shell name no longer has its cwd/env,
+// so the next open — including on a replacement session — can say so.
+// A name that was never opened is not marked, and the mark is one-shot.
+func (m *Manager) markShellLost(host, name string) {
+	if m == nil || host == "" || name == "" {
+		return
+	}
+	m.lostMu.Lock()
+	defer m.lostMu.Unlock()
+	if m.lost == nil {
+		m.lost = map[string]map[string]struct{}{}
+	}
+	set := m.lost[host]
+	if set == nil {
+		set = map[string]struct{}{}
+		m.lost[host] = set
+	}
+	set[name] = struct{}{}
+}
+
+// takeShellLost reports and clears a pending loss for host's shell name.
+func (m *Manager) takeShellLost(host, name string) bool {
+	if m == nil || host == "" || name == "" {
+		return false
+	}
+	m.lostMu.Lock()
+	defer m.lostMu.Unlock()
+	set := m.lost[host]
+	if _, ok := set[name]; !ok {
+		return false
+	}
+	delete(set, name)
+	if len(set) == 0 {
+		delete(m.lost, host)
+	}
+	return true
 }
 
 // deleteIf drops the map entry only when it is still this session — a

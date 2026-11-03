@@ -36,6 +36,13 @@ type Session struct {
 	shells   map[string]*Shell // keyed by shell name
 	openMu   sync.Mutex        // serializes opening a shell (one PTY per name)
 
+	// markLost records that name's cwd/env are gone; takeLost reports that
+	// once, on the next open. Both are nil unless Manager.Connect wired them.
+	// spawnShell, when set, replaces the real PTY open. Tests only.
+	markLost   func(name string)
+	takeLost   func(name string) bool
+	spawnShell func(name, owner string) (*Shell, error)
+
 	sftpMu sync.Mutex
 	sftp   *sftp.Client
 
@@ -185,12 +192,8 @@ func (s *Session) close() {
 	}
 	// Drain the shells map but keep it non-nil so any racing OpenShell
 	// fails the closed check below cleanly rather than panicking on a nil map.
-	s.shellsMu.Lock()
-	for id, sh := range s.shells {
-		_ = sh.Close()
-		delete(s.shells, id)
-	}
-	s.shellsMu.Unlock()
+	// closeAllShells also records the names, so the next session can say cwd/env were lost.
+	s.closeAllShells()
 	// clearClient already atomically drops both the SSH client and the SFTP
 	// client that rides on it — no need to call closeSFTP separately.
 	s.clearClient()

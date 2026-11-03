@@ -256,6 +256,7 @@ func (sess *Session) liveShell(name, owner string) (*Shell, error) {
 		return nil, nil
 	}
 	if sh.isClosed() {
+		sess.noteShellLost(name)
 		delete(sess.shells, name)
 		_ = sh.Close()
 		return nil, nil
@@ -267,7 +268,8 @@ func (sess *Session) liveShell(name, owner string) (*Shell, error) {
 }
 
 // OpenOrRespawn returns the named shell owned by owner, opening it if it
-// doesn't exist or its PTY died. Second return = respawn (shell_restarted).
+// doesn't exist or its PTY died. The bool is true only when this open
+// replaces a shell whose cwd/env are gone — a first open of a name is false.
 func (sess *Session) OpenOrRespawn(name, owner string) (*Shell, bool, error) {
 	if sess.closed.Load() {
 		return nil, false, fmt.Errorf("session %q is closed", sess.ID)
@@ -286,22 +288,38 @@ func (sess *Session) OpenOrRespawn(name, owner string) (*Shell, bool, error) {
 		return sh, false, err
 	}
 
-	// Login bash first, then a shell that skips rc entirely (no bash on the
-	// host, or rc files that never come back).
-	sh, err := sess.OpenShell(name, owner)
-	if err == nil {
-		sess.registerShell(name, sh)
-		return sh, true, nil
-	}
-	if !errors.Is(err, errDegradedRetry) {
+	sh, err := sess.openNamed(name, owner)
+	if err != nil {
 		return nil, false, err
 	}
-	deg, derr := sess.openDegraded(name, owner)
-	if derr != nil {
-		return nil, false, derr
+	sess.registerShell(name, sh)
+	return sh, sess.consumeShellLost(name), nil
+}
+
+// openNamed opens a login bash, falling back to a shell that skips rc.
+// spawnShell, when set, replaces both — tests never dial.
+func (sess *Session) openNamed(name, owner string) (*Shell, error) {
+	if sess.spawnShell != nil {
+		return sess.spawnShell(name, owner)
 	}
-	sess.registerShell(name, deg)
-	return deg, true, nil
+	sh, err := sess.OpenShell(name, owner)
+	if err == nil || !errors.Is(err, errDegradedRetry) {
+		return sh, err
+	}
+	return sess.openDegraded(name, owner)
+}
+
+func (sess *Session) noteShellLost(name string) {
+	if sess.markLost != nil && name != "" {
+		sess.markLost(name)
+	}
+}
+
+func (sess *Session) consumeShellLost(name string) bool {
+	if sess.takeLost == nil || name == "" {
+		return false
+	}
+	return sess.takeLost(name)
 }
 
 // DropShell removes and closes the named shell if the caller owns it —
@@ -310,6 +328,7 @@ func (sess *Session) DropShell(name, owner string) {
 	sess.shellsMu.Lock()
 	defer sess.shellsMu.Unlock()
 	if sh, ok := sess.shells[name]; ok && sh.Owner == owner {
+		sess.noteShellLost(name)
 		delete(sess.shells, name)
 		_ = sh.Close()
 	}

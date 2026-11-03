@@ -227,6 +227,31 @@ func TestShellCommand(t *testing.T) {
 	}
 }
 
+func TestFirstShellDoesNotReportRestart(t *testing.T) {
+	t.Parallel()
+	mc, _, _, teardown := setupDaemon(t)
+	defer teardown()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for _, name := range []string{"", "b"} {
+		args := map[string]any{"host": "testhost", "command": "echo ok"}
+		if name != "" {
+			args["shell"] = name
+		}
+		r, err := shellCall(t, mc, ctx, args)
+		if err != nil {
+			t.Fatalf("shell %q: %v", name, err)
+		}
+		if r.ShellRestarted || strings.Contains(r.Output, "shell restarted") {
+			t.Fatalf("shell %q first open reported restart: %+v", name, r)
+		}
+		if !strings.Contains(r.Output, "ok") {
+			t.Fatalf("shell %q output: %q", name, r.Output)
+		}
+	}
+}
+
 func TestShellPersistsState(t *testing.T) {
 	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
