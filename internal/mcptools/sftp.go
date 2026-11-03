@@ -30,7 +30,7 @@ const (
 // RegisterSFTP registers the file tools.
 func RegisterSFTP(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool("ssh_file_list",
-		mcp.WithDescription("List a directory on the remote host via SFTP."),
+		mcp.WithDescription("List one directory on the remote host via SFTP. For a recursive listing or a content search, run find / grep -rn / rg through ssh_shell — there is no separate search tool."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
 		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 	), handleFileList(st))
