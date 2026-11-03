@@ -21,8 +21,7 @@ func TestWebUISessionLifecycle(t *testing.T) {
 	defer cancel()
 
 	// A session is opened transparently by the first ssh_shell call.
-	var r shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{"host": "testhost", "command": "echo hi"}, &r); err != nil {
+	if _, err := shellCall(t, mc, ctx, map[string]any{"host": "testhost", "command": "echo hi"}); err != nil {
 		t.Fatalf("ssh_shell: %v", err)
 	}
 

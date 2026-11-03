@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -16,7 +17,7 @@ const SSHHostsTool = "ssh_hosts"
 
 func RegisterSSHHosts(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool(SSHHostsTool,
-		mcp.WithDescription("List the SSH host aliases the user has exposed to agents. Each entry is just an alias name — connection details from the daemon user's ssh config are never returned. Hosts the user left off are omitted. The tool itself is hidden until at least one host is exposed. Pass an alias to ssh_shell or the ssh_file_* tools as 'host'."),
+		mcp.WithDescription("List the SSH host aliases the user has exposed to agents. Each entry is just an alias name — connection details from the daemon user's ssh config are never returned. Hosts the user left off are omitted. The tool itself is hidden until at least one host is exposed. Pass an alias to ssh_shell or the ssh_file_* tools as 'host'. One alias per line."),
 	), handleSSHHosts(st))
 }
 
@@ -34,7 +35,7 @@ func handleSSHHosts(st *State) server.ToolHandlerFunc {
 		for _, h := range exposed {
 			aliases = append(aliases, h.Alias)
 		}
-		return st.resultJSON(aliases)
+		return resultText(strings.Join(aliases, "\n"))
 	}
 }
 

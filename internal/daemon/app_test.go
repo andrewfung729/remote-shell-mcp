@@ -53,7 +53,19 @@ var initRequest = func() string {
 func startApp(t *testing.T, aliases []string, opts AppOptions) *testApp {
 	t.Helper()
 	fakeHome(t, aliases...)
+	return serveTestApp(t, opts)
+}
 
+// startAppConfig is startApp with a full ssh config, so a test can point an
+// alias at a local port or omit User.
+func startAppConfig(t *testing.T, config string, opts AppOptions) *testApp {
+	t.Helper()
+	writeSSHHome(t, config)
+	return serveTestApp(t, opts)
+}
+
+func serveTestApp(t *testing.T, opts AppOptions) *testApp {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -100,17 +112,27 @@ func startApp(t *testing.T, aliases []string, opts AppOptions) *testApp {
 // developer's real ssh config is never read.
 func fakeHome(t *testing.T, aliases ...string) {
 	t.Helper()
+	var cfg strings.Builder
+	for _, alias := range aliases {
+		fmt.Fprintf(&cfg, "Host %s\n  HostName 10.0.0.1\n  User alice\n", alias)
+	}
+	writeSSHHome(t, cfg.String())
+}
+
+func writeSSHHome(t *testing.T, config string) {
+	t.Helper()
 	dir := t.TempDir()
 	sshDir := filepath.Join(dir, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatalf("mkdir .ssh: %v", err)
 	}
-	var cfg strings.Builder
-	for _, alias := range aliases {
-		fmt.Fprintf(&cfg, "Host %s\n  HostName 10.0.0.1\n  User alice\n", alias)
-	}
-	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(cfg.String()), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(config), 0o600); err != nil {
 		t.Fatalf("write ssh config: %v", err)
+	}
+	// An empty known_hosts lets a dial reach the socket. A missing file
+	// fails in HostKeyCallback before any TCP connection.
+	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), nil, 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
 	}
 	t.Setenv("HOME", dir)
 }
@@ -291,8 +313,10 @@ func (a *testApp) toolCallable(name string) bool {
 
 type hostsView struct {
 	Hosts []struct {
-		Alias   string `json:"alias"`
-		Exposed bool   `json:"exposed"`
+		Alias              string    `json:"alias"`
+		Exposed            bool      `json:"exposed"`
+		LastConnectError   string    `json:"last_connect_error"`
+		LastConnectErrorAt time.Time `json:"last_connect_error_at"`
 	} `json:"hosts"`
 	Error string `json:"error"`
 }

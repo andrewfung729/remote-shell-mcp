@@ -58,7 +58,7 @@ func RegisterSFTP(srv *server.MCPServer, st *State) {
 	), handleFileWrite(st))
 
 	srv.AddTool(mcp.NewTool("ssh_file_edit",
-		mcp.WithDescription("Replace text in a remote file in place. old_text must occur exactly once, byte for byte (CRLF included) — otherwise the call fails and changes nothing. Read the file with ssh_file_read first: an edit is refused when this daemon has no record of the file's content or when the file changed since that read. Both the file and the result must fit the 256 KiB (262144 bytes) inline budget. Returns the line the replacement starts on and the new line count."),
+		mcp.WithDescription("Replace text in a remote file in place. old_text must occur exactly once, byte for byte (CRLF included) — otherwise the call fails and changes nothing. Read the file with ssh_file_read first: an edit is refused when this daemon has no record of the file's content or when the file changed since that read. Both the file and the result must fit the 256 KiB (262144 bytes) inline budget. Returns one sentence naming the edited lines and the new line count."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Exposed host alias (see ssh_hosts).")),
 		mcp.WithString("path", mcp.Required(), mcp.Description(remotePathDesc)),
 		mcp.WithString("old_text", mcp.Required(), mcp.Description("Exact text to replace; must occur exactly once.")),
@@ -105,7 +105,7 @@ func handleFileList(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		return st.resultJSON(entries)
+		return resultText(formatFileList(entries))
 	}
 }
 
@@ -134,7 +134,7 @@ func handleFileStat(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		return st.resultJSON(info)
+		return resultText(formatFileStat(*info))
 	}
 }
 
@@ -179,7 +179,7 @@ func handleFileRead(st *State) server.ToolHandlerFunc {
 		// Record the whole file even when the window was partial: an edit's
 		// own read compares against this hash.
 		st.Guard.AfterRead(caller(ctx), host, path, buf)
-		return st.resultJSON(win)
+		return resultText(formatLineWindow(win))
 	}
 }
 
@@ -219,15 +219,8 @@ func handleFileWrite(st *State) server.ToolHandlerFunc {
 		if werr != nil {
 			return resultErr(werr)
 		}
-		return st.resultJSON(map[string]any{"bytes_written": len(data)})
+		return resultText(formatWrite(path, len(data)))
 	}
-}
-
-// editResult is what a successful ssh_file_edit returns: where the change
-// landed and how big the file is now — never the file itself.
-type editResult struct {
-	StartLine  int `json:"start_line"`
-	TotalLines int `json:"total_lines"`
 }
 
 func handleFileEdit(st *State) server.ToolHandlerFunc {
@@ -302,10 +295,7 @@ func handleFileEdit(st *State) server.ToolHandlerFunc {
 			return resultErr(fmt.Errorf("write failed, a partial file may remain: %w", werr))
 		}
 		st.Guard.AfterEdit(client, host, path, result, nil)
-		return st.resultJSON(editResult{
-			StartLine:  startLineAt(result, idx),
-			TotalLines: lineCount(result),
-		})
+		return resultText(formatEdit(startLineAt(result, idx), lineCount(result), newText))
 	}
 }
 
@@ -342,7 +332,7 @@ func handleUpload(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		return st.resultJSON(map[string]any{"bytes": n})
+		return resultText(formatUpload(remote, n))
 	}
 }
 
@@ -379,6 +369,6 @@ func handleDownload(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
-		return st.resultJSON(map[string]any{"bytes": n})
+		return resultText(formatDownload(local, n))
 	}
 }

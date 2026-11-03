@@ -99,6 +99,8 @@ type Shell struct {
 	Degraded bool   // true when kind != kindBashRC
 	OpenedAt time.Time
 
+	lastActivity time.Time // last ssh_shell call that touched this shell
+
 	parent  *Session
 	session *ssh.Session
 	stdin   io.Writer
@@ -151,12 +153,14 @@ func (sess *Session) openShellOn(name, owner, script string) (*Shell, error) {
 		return nil, fmt.Errorf("start shell: %w", err)
 	}
 
+	now := time.Now()
 	sh := &Shell{
 		Name: name, Owner: owner,
 		parent: sess, session: chSess, stdin: stdin,
-		out:      newShellReader(),
-		doneCh:   make(chan struct{}),
-		OpenedAt: time.Now(),
+		out:          newShellReader(),
+		doneCh:       make(chan struct{}),
+		OpenedAt:     now,
+		lastActivity: now,
 	}
 	// Two streams feed one reader, so "the PTY is gone" must mean BOTH are
 	// drained: closing on whichever stream sees EOF first would drop output
@@ -606,6 +610,12 @@ func (r *shellReader) waitLocked(d time.Duration) {
 	t.Stop()
 }
 
+func (r *shellReader) busy() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.running
+}
+
 func (r *shellReader) beginRun() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -675,9 +685,11 @@ func (r *shellReader) partialLocked() *RunResult {
 
 const maxOutputChars = 10_000
 
-// ansiRe covers CSI, OSC (…BEL or …ST), DCS/SOS/PM/APC (…ST), and simple
-// Fe/Fp escapes — the full set a PTY emits.
-var ansiRe = regexp.MustCompile("\x1b(?:\\[[0-9;?]*[ -/]*[@-~]|\\][^\x07]*(?:\x07|\x1b\\\\)|[PX^_][^\x1b]*(?:\x1b\\\\|$)|[@-_])")
+// ansiRe covers CSI, OSC (…BEL or …ST), DCS/SOS/PM/APC (…ST), charset
+// selects (ESC ( B style), and every remaining two-byte escape a PTY emits —
+// including the 0x30–0x3F set the old [@-_] clause missed (ESC=, ESC>,
+// ESC7/8, ESCC/D/E/M…).
+var ansiRe = regexp.MustCompile("\x1b(?:\\[[0-9;?]*[ -/]*[@-~]|\\][^\x07]*(?:\x07|\x1b\\\\)|[PX^_][^\x1b]*(?:\x1b\\\\|$)|[ -/]+.|[ -~])")
 
 // stripANSI removes escape sequences and residual terminal litter
 // (CRs, backspace overstrike).

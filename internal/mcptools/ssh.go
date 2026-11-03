@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -19,22 +20,17 @@ import (
 // ssh_hosts.
 const SSHShellTool = "ssh_shell"
 
-// ErrHostNotExposed is the refusal every tool gives for a host the user has
-// not exposed in the WebUI. The message never reveals whether the alias
-// exists in ssh config.
-var ErrHostNotExposed = errors.New("host not exposed")
-
 func RegisterSSH(srv *server.MCPServer, st *State) {
 	srv.AddTool(mcp.NewTool(SSHShellTool,
-		mcp.WithDescription("Run commands on an exposed SSH host as if it were a local shell. Pass host + command: the call returns when the command finishes or timeout_ms expires, with clean output, exit code and cwd. cd and export persist between calls on the same host. Exactly one of command/input/interrupt/poll/reset per call: command runs text; a long command keeps running past timeout (status running) — poll collects more output, input feeds an interactive program or prompt (append \n), interrupt sends Ctrl-C, reset replaces a polluted shell. Use shell to name a second parallel shell on the same host (default: 'default'). Hosts must be exposed in the WebUI first; ssh_hosts lists the exposed aliases."),
+		mcp.WithDescription("Run commands on an exposed SSH host as if it were a local shell. Pass host + command: the call returns the command's output as text, then one status line, when the command finishes or timeout_ms expires. cd and export persist between calls on the same host. Exactly one of command/input/interrupt/poll/reset per call: command runs text; a long command keeps running past timeout — poll collects more output; input feeds an interactive program and then waits; interrupt sends Ctrl-C and then waits; reset replaces a polluted shell. Omit shell to use default. Hosts must be exposed in the WebUI first; ssh_hosts lists the exposed aliases."),
 		mcp.WithString("host", mcp.Required(), mcp.Description("Host alias the user exposed in the WebUI (see ssh_hosts).")),
-		mcp.WithString("command", mcp.Description("Shell command to run. Returns output + exit_code + cwd when done, or status running on timeout.")),
-		mcp.WithString("input", mcp.Description("Bytes to send to the running command's stdin (answers prompts, drives vim/less). Include \n to submit a line.")),
-		mcp.WithBoolean("interrupt", mcp.Description("Send Ctrl-C to the running command.")),
-		mcp.WithBoolean("poll", mcp.Description("Collect output from a running (or just-finished) command. Returns its output, exit code and cwd once done.")),
+		mcp.WithString("command", mcp.Description("Shell command to run. Returns its output, then a status line with the exit code and cwd, or 'running — poll to continue' on timeout.")),
+		mcp.WithString("input", mcp.Description("Bytes to send to the running command's stdin (answers prompts, drives vim/less). Include a newline to submit a line. The call then waits (default 2s, or timeout_ms) and returns the output and status, the same text shape as command and poll.")),
+		mcp.WithBoolean("interrupt", mcp.Description("Send Ctrl-C to the running command, then wait (default 2s, or timeout_ms) and return the output and status, including the exit code if the program ended.")),
+		mcp.WithBoolean("poll", mcp.Description("Collect output from a running (or just-finished) command. Returns its output and a status line (exit code and cwd once done).")),
 		mcp.WithBoolean("reset", mcp.Description("Kill and respawn the named shell — recovers from a polluted environment (cd/env are lost).")),
-		mcp.WithString("shell", mcp.Description("Shell name on this host (default 'default'). Separate names run in parallel shells.")),
-		mcp.WithNumber("timeout_ms", mcp.Description("Max wait for command/poll to finish (default 30000, max 3600000). On expiry the command keeps running.")),
+		mcp.WithString("shell", mcp.Description("Shell name on this host. Omit it to use default. Use a throwaway name such as scratch for a one-off command that must not touch the default shell's cwd or env; separate names run in parallel. A shell idle for 30 minutes is closed, and the next call reopens it — the status line says the shell restarted and cwd/env were lost.")),
+		mcp.WithNumber("timeout_ms", mcp.Description("Max wait in milliseconds. command and poll default to 30000; input and interrupt default to 2000. Clamped to 3600000. On expiry a command keeps running — poll (or another input) continues it.")),
 	), handleSSHShell(st))
 }
 
@@ -53,6 +49,7 @@ type shellArgs struct {
 
 const (
 	shellDefaultTimeout = 30_000
+	shellReportTimeout  = 2_000     // input and interrupt wait this long unless timeout_ms is set
 	shellMaxTimeout     = 3_600_000 // 1h
 )
 
@@ -116,10 +113,11 @@ func targetHost(req mcp.CallToolRequest) (string, error) {
 
 // checkExposed is the exposure gate shared by ssh_shell and every file tool.
 // It runs before any argument check so an unexposed host always gets the same
-// refusal — the message never reveals whether the alias exists in ssh config.
+// refusal. The message names the exposed aliases — they are the one piece of
+// config the agent is already allowed to see (ssh_hosts returns the same list).
 func checkExposed(st *State, host string) error {
 	if !st.IsExposed(host) {
-		return ErrHostNotExposed
+		return errNotExposed(st, host)
 	}
 	return nil
 }
@@ -128,15 +126,28 @@ func checkExposed(st *State, host string) error {
 // first use. It is the last step, after the exposure check and the argument
 // checks, so a typo never opens a connection. A call that lands while another
 // is still dialing the same host waits for that dial (bounded by ctx) instead
-// of failing on a half-built session.
+// of failing on a half-built session. Every failure comes back in one fixed
+// shape — the raw error is logged and kept for the WebUI, never sent to the agent.
 func dial(ctx context.Context, st *State, host string) (*sshx.Session, error) {
-	return st.SSH.Connect(ctx, host)
+	sess, err := st.SSH.Connect(ctx, host)
+	if err != nil {
+		if st.Log != nil {
+			st.Log.Warn("ssh connect failed", "host", host, "err", err)
+		}
+		return nil, agentConnectError(host, err)
+	}
+	return sess, nil
 }
 
-// shellTimeout clamps timeout_ms to [default, 1h].
-func shellTimeout(ms int) time.Duration {
+// agentConnectError is the only connection-failure text an agent sees.
+func agentConnectError(host string, err error) error {
+	return fmt.Errorf("cannot connect to %q (%s). Do not retry, run local ssh/scp/sftp/rsync, or edit ssh config — ask the user to check this host; details are on the WebUI hosts page.", host, sshx.ConnectCategory(err))
+}
+
+// shellTimeout clamps timeout_ms to [def, 1h].
+func shellTimeout(ms, def int) time.Duration {
 	if ms <= 0 {
-		ms = shellDefaultTimeout
+		ms = def
 	}
 	if ms > shellMaxTimeout {
 		ms = shellMaxTimeout
@@ -144,27 +155,19 @@ func shellTimeout(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// shellResult is the JSON shape ssh_shell returns.
-type shellResult struct {
-	Output         string `json:"output"`
-	Status         string `json:"status"`
-	ExitCode       *int   `json:"exit_code,omitempty"`
-	CWD            string `json:"cwd,omitempty"`
-	Truncated      bool   `json:"truncated,omitempty"`
-	ShellRestarted bool   `json:"shell_restarted,omitempty"`
-	ShellDegraded  bool   `json:"shell_degraded,omitempty"`
+func finish(res *sshx.RunResult, sh *sshx.Shell, name string, restarted bool) (*mcp.CallToolResult, error) {
+	return resultText(formatShell(res.Output, res.Status, res.CWD, name, res.ExitCode, res.Truncated, restarted, sh.Degraded))
 }
 
-func finish(st *State, res *sshx.RunResult, sh *sshx.Shell, restarted bool) (*mcp.CallToolResult, error) {
-	return st.resultJSON(shellResult{
-		Output:         res.Output,
-		Status:         res.Status,
-		ExitCode:       res.ExitCode,
-		CWD:            res.CWD,
-		Truncated:      res.Truncated,
-		ShellRestarted: restarted,
-		ShellDegraded:  sh.Degraded,
-	})
+// errNotExposed formats the exposure refusal with the list the caller can
+// actually use — "host not exposed" alone sent agents rummaging through ssh
+// config when they just typo'd the alias.
+func errNotExposed(st *State, host string) error {
+	exposed := st.ExposedHosts()
+	if len(exposed) == 0 {
+		return fmt.Errorf("host not exposed: %q — no hosts are exposed; ask the user to expose one in the WebUI", host)
+	}
+	return fmt.Errorf("host not exposed: %q — exposed hosts: %s", host, strings.Join(exposed, ", "))
 }
 
 func handleSSHShell(st *State) server.ToolHandlerFunc {
@@ -195,7 +198,7 @@ func handleSSHShell(st *State) server.ToolHandlerFunc {
 			name = "default"
 		}
 		owner := caller(ctx)
-		timeout := shellTimeout(args.TimeoutMs)
+		timeout := shellTimeout(args.TimeoutMs, shellDefaultTimeout)
 
 		// reset drops the shell first; everything else lazily (re)opens it.
 		if act == actReset {
@@ -205,6 +208,10 @@ func handleSSHShell(st *State) server.ToolHandlerFunc {
 		if err != nil {
 			return resultErr(err)
 		}
+		// Every call is activity, including one that then blocks on a long
+		// command — touch again when it returns so idle time starts then.
+		sh.Touch()
+		defer sh.Touch()
 
 		switch act {
 		case actCommand:
@@ -212,25 +219,33 @@ func handleSSHShell(st *State) server.ToolHandlerFunc {
 			if err != nil {
 				return resultErr(err)
 			}
-			return finish(st, res, sh, restarted)
+			return finish(res, sh, name, restarted)
 		case actPoll:
 			res, err := sh.Poll(timeout)
 			if err != nil {
 				return resultErr(err)
 			}
-			return finish(st, res, sh, restarted)
+			return finish(res, sh, name, restarted)
 		case actInput:
 			if err := sh.Input(*args.Input); err != nil {
 				return resultErr(err)
 			}
-			return st.resultJSON(shellResult{Status: "running", ShellRestarted: restarted, ShellDegraded: sh.Degraded})
+			res, err := sh.Poll(shellTimeout(args.TimeoutMs, shellReportTimeout))
+			if err != nil {
+				return resultErr(err)
+			}
+			return finish(res, sh, name, restarted)
 		case actInterrupt:
 			if err := sh.Interrupt(); err != nil {
 				return resultErr(err)
 			}
-			return st.resultJSON(shellResult{Status: "running", ShellRestarted: restarted, ShellDegraded: sh.Degraded})
+			res, err := sh.Poll(shellTimeout(args.TimeoutMs, shellReportTimeout))
+			if err != nil {
+				return resultErr(err)
+			}
+			return finish(res, sh, name, restarted)
 		case actReset:
-			return st.resultJSON(shellResult{Status: "done", ShellRestarted: restarted, ShellDegraded: sh.Degraded})
+			return resultText(formatShell("", "done", "", name, nil, false, restarted, sh.Degraded))
 		}
 		return resultErr(fmt.Errorf("unknown action"))
 	}

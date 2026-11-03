@@ -23,11 +23,14 @@ half-built session — one connection, one outcome, never a transient error.
 ## shell
 
 A named PTY on a session (created lazily by `ssh_shell` on first use,
-named by the `shell` argument, default `default`). A shell keeps its
+named by the `shell` argument; omitted, the call opens `default`). A shell keeps its
 working directory, environment and running programs between MCP calls —
 `cd`, `vim`, `tail -f` all survive. A shell is *long-lived*: it lasts
-as long as the session (or until `reset`), but it is not restored after a
-daemon restart. Not to be confused with *persistent*.
+as long as the session, until `reset`, or until it has been idle for 30
+minutes with no command in flight — the next call reopens it and the
+status line says so. The shell name appears in that status line only when
+it is not `default`. A shell is not restored after a daemon restart. Not
+to be confused with *persistent*.
 
 ## persistent
 

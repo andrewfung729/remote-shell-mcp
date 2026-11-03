@@ -87,8 +87,8 @@
     </div>
     <p class="muted" id="hosts-err"></p>
     <table>
-      <thead><tr><th>agent</th><th>alias</th><th>user</th><th>hostname</th><th>port</th><th>proxy jump</th></tr></thead>
-      <tbody id="hosts-body"><tr><td colspan="6" class="muted">loading…</td></tr></tbody>
+      <thead><tr><th>agent</th><th>alias</th><th>user</th><th>hostname</th><th>port</th><th>proxy jump</th><th>last failure</th></tr></thead>
+      <tbody id="hosts-body"><tr><td colspan="7" class="muted">loading…</td></tr></tbody>
     </table>
   </section>
   <section>
@@ -166,13 +166,14 @@ async function loadHosts(){
     tb.innerHTML = '';
     const rows = s.hosts || [];
     if(!rows.length){
-      tb.innerHTML = '<tr><td colspan="6" class="muted">no concrete hosts in ~/.ssh/config</td></tr>';
+      tb.innerHTML = '<tr><td colspan="7" class="muted">no concrete hosts in ~/.ssh/config</td></tr>';
       return;
     }
     for(const h of rows){
       const tr = document.createElement('tr');
       tr.innerHTML = '<td><label class="switch"><input type="checkbox" '+(h.exposed?'checked':'')+'><span class="track"></span></label></td>'+
-        '<td><b>'+esc(h.alias||'')+'</b></td><td>'+esc(h.user||'')+'</td><td>'+esc(h.hostname||'')+'</td><td>'+esc(h.port||'')+'</td><td class="muted">'+esc(h.proxy_jump||'')+'</td>';
+        '<td><b>'+esc(h.alias||'')+'</b></td><td>'+esc(h.user||'')+'</td><td>'+esc(h.hostname||'')+'</td><td>'+esc(h.port||'')+'</td><td class="muted">'+esc(h.proxy_jump||'')+'</td>'+
+        '<td class="muted">'+esc(h.last_connect_error||'')+(h.last_connect_error_at?' '+esc(new Date(h.last_connect_error_at).toLocaleString()):'')+'</td>';
       const input = tr.querySelector('input');
       const alias = h.alias;
       input.onchange = async e => {
@@ -187,7 +188,7 @@ async function loadHosts(){
       tb.appendChild(tr);
     }
   }catch(e){
-    $('#hosts-body').innerHTML = '<tr><td colspan="6" class="muted">'+esc(e.message)+'</td></tr>';
+    $('#hosts-body').innerHTML = '<tr><td colspan="7" class="muted">'+esc(e.message)+'</td></tr>';
   }
 }
 $('#hosts-refresh').onclick = () => loadHosts();

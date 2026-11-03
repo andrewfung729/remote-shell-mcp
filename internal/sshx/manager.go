@@ -17,11 +17,16 @@ type dialFunc func(spec ConnectSpec) (client *ssh.Client, jumps []*ssh.Client, a
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	failures map[string]ConnectFailure // last failed dial per alias; not a negative cache
 	dial     dialFunc
 }
 
 func NewManager() *Manager {
-	return &Manager{sessions: map[string]*Session{}, dial: dialFinal}
+	return &Manager{
+		sessions: map[string]*Session{},
+		failures: map[string]ConnectFailure{},
+		dial:     dialFinal,
+	}
 }
 
 // ErrNoSSHConfigEntry is returned when the host alias matches no concrete
@@ -54,16 +59,16 @@ func (m *Manager) Connect(ctx context.Context, host string) (*Session, error) {
 	}
 
 	if !hasConfigEntry(host) {
-		return nil, errNoSSHConfigEntry
+		return m.failConnect(host, fmt.Errorf("%w: %s", errConfigIncomplete, errNoSSHConfigEntry.Error()))
 	}
 	spec := ConnectSpec{Addresses: []string{host}}
 	resolveFromSSHConfig(&spec)
 	if spec.User == "" {
-		return nil, errors.New("no user: the ssh_config entry doesn't set User (add one to ~/.ssh/config)")
+		return m.failConnect(host, fmt.Errorf("%w: the ssh_config entry doesn't set User (add one to ~/.ssh/config)", errConfigIncomplete))
 	}
 	for _, j := range spec.JumpHosts {
 		if j.User == "" {
-			return nil, errors.New("a jump host has no user: set User in its ssh_config entry")
+			return m.failConnect(host, fmt.Errorf("%w: a jump host has no User in its ssh_config entry", errConfigIncomplete))
 		}
 	}
 	id := host
@@ -87,6 +92,9 @@ func (m *Manager) Connect(ctx context.Context, host string) (*Session, error) {
 	// ready — so every path out of this function must settle it.
 	client, jumps, addr, err := m.dial(spec)
 	if err != nil {
+		// Record the raw error, then drop the session. The next call dials
+		// again — a failure is never a cached answer.
+		m.noteFailure(id, err)
 		m.deleteIf(id, sess)
 		sess.settle(err)
 		return nil, err
@@ -96,13 +104,55 @@ func (m *Manager) Connect(ctx context.Context, host string) (*Session, error) {
 		// new connection — clean up the map entry if it's still there.
 		m.deleteIf(id, sess)
 		lost := errors.New("session was disconnected during connect")
+		m.noteFailure(id, lost)
 		sess.settle(lost)
 		return nil, lost
 	}
 
 	sess.startKeepalive()
+	sess.startReaper()
+	m.clearFailure(id)
 	sess.settle(nil)
 	return sess, nil
+}
+
+// ConnectFailure is the raw cause of the last failed dial for an alias,
+// shown on the WebUI hosts page. A successful connect clears it. It does
+// not short-circuit the next dial.
+type ConnectFailure struct {
+	Error string
+	At    time.Time
+}
+
+func (m *Manager) failConnect(host string, err error) (*Session, error) {
+	m.noteFailure(host, err)
+	return nil, err
+}
+
+func (m *Manager) noteFailure(host string, err error) {
+	if err == nil || host == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failures == nil {
+		m.failures = map[string]ConnectFailure{}
+	}
+	m.failures[host] = ConnectFailure{Error: err.Error(), At: time.Now()}
+}
+
+func (m *Manager) clearFailure(host string) {
+	m.mu.Lock()
+	delete(m.failures, host)
+	m.mu.Unlock()
+}
+
+// LastConnectFailure returns the raw error recorded for alias, if any.
+func (m *Manager) LastConnectFailure(host string) (ConnectFailure, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	f, ok := m.failures[host]
+	return f, ok
 }
 
 // deleteIf drops the map entry only when it is still this session — a

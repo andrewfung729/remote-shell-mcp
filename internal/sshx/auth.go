@@ -102,7 +102,7 @@ func (a AuthSpec) Build() ([]ssh.AuthMethod, closerList, error) {
 
 	if len(methods) == 0 {
 		closers.Close()
-		return nil, nil, errors.New("no auth: the ssh_config entry sets neither IdentityFile nor IdentityAgent")
+		return nil, nil, fmt.Errorf("%w: the ssh_config entry sets neither IdentityFile nor IdentityAgent", errConfigIncomplete)
 	}
 	return methods, closers, nil
 }
@@ -193,11 +193,11 @@ func HostKeyCallback(knownHostsPath string) (ssh.HostKeyCallback, error) {
 	}
 	cb, err := knownhosts.New(knownHostsPath)
 	if err != nil {
-		return nil, fmt.Errorf("known_hosts: %w (ssh to the host once to accept its key)", err)
+		return nil, fmt.Errorf("%w: known_hosts: %s (ssh to the host once to accept its key)", errHostKeyUntrusted, err.Error())
 	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		if err := cb(hostname, remote, key); err != nil {
-			return fmt.Errorf("host key verification failed for %s: %w — ssh to the host once to accept its key", hostname, err)
+			return fmt.Errorf("%w: host key verification failed for %s: %s — ssh to the host once to accept its key", errHostKeyUntrusted, hostname, err.Error())
 		}
 		return nil
 	}, nil

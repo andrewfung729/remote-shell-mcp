@@ -17,8 +17,8 @@ import (
 )
 
 // Client wraps the mcp-go library client. Call/CallText/CallJSON keep call
-// sites uniform: Call returns the raw CallToolResult JSON, CallText unwraps
-// the first text content block, CallJSON unmarshals it into a struct.
+// sites uniform: Call returns the raw CallToolResult JSON, CallText returns
+// the first text block as-is, CallJSON unmarshals that text into a struct.
 type Client struct {
 	t  *testing.T
 	c  *mcpclient.Client
@@ -66,7 +66,7 @@ func (c *Client) initialize() {
 
 // ListTools returns the tool names the server currently advertises.
 func (c *Client) ListTools(ctx context.Context) ([]string, error) {
-	res, err := c.c.ListTools(ctx, mcp.ListToolsRequest{})
+	res, err := c.list(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +75,24 @@ func (c *Client) ListTools(ctx context.Context) ([]string, error) {
 		names = append(names, tool.Name)
 	}
 	return names, nil
+}
+
+// OutputSchemaTypes returns each tool's output-schema type, or "" when the
+// tool declares none. Text-only tools declare none.
+func (c *Client) OutputSchemaTypes(ctx context.Context) (map[string]string, error) {
+	res, err := c.list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(res.Tools))
+	for _, tool := range res.Tools {
+		out[tool.Name] = tool.OutputSchema.Type
+	}
+	return out, nil
+}
+
+func (c *Client) list(ctx context.Context) (*mcp.ListToolsResult, error) {
+	return c.c.ListTools(ctx, mcp.ListToolsRequest{})
 }
 
 // OnNotification registers a handler for server notifications such as
@@ -117,7 +135,7 @@ func (c *Client) Call(ctx context.Context, tool string, args map[string]any) (js
 }
 
 // CallText invokes a tool and returns its first text content block. A tool
-// error result is returned as text plus a non-nil error.
+// error result is returned as that text plus a non-nil error.
 func (c *Client) CallText(ctx context.Context, tool string, args map[string]any) (string, error) {
 	var req mcp.CallToolRequest
 	req.Params.Name = tool
@@ -129,12 +147,11 @@ func (c *Client) CallText(ctx context.Context, tool string, args map[string]any)
 	if err != nil {
 		return "", err
 	}
-	if len(res.Content) == 0 {
-		return "", nil
-	}
 	var text string
-	if tc, ok := res.Content[0].(mcp.TextContent); ok {
-		text = tc.Text
+	if len(res.Content) > 0 {
+		if tc, ok := res.Content[0].(mcp.TextContent); ok {
+			text = tc.Text
+		}
 	}
 	if res.IsError {
 		return text, fmt.Errorf("tool error: %s", text)
@@ -142,7 +159,7 @@ func (c *Client) CallText(ctx context.Context, tool string, args map[string]any)
 	return text, nil
 }
 
-// CallJSON calls a tool and unmarshals its text content into out.
+// CallJSON calls a tool and unmarshals its text block into out.
 func (c *Client) CallJSON(ctx context.Context, tool string, args map[string]any, out any) error {
 	text, err := c.CallText(ctx, tool, args)
 	if err != nil {

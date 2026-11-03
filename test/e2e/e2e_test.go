@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,15 +26,77 @@ func TestMain_BinariesAndImage(t *testing.T) {
 	EnsureDockerImage(t)
 }
 
-// shellResp is the ssh_shell JSON result.
+// shellResp is the ssh_shell status line, parsed for assertions. The text
+// block is the output plus one bracketed line; there is no JSON result.
 type shellResp struct {
-	Output         string `json:"output"`
-	Status         string `json:"status"`
-	ExitCode       *int   `json:"exit_code"`
-	CWD            string `json:"cwd"`
-	Truncated      bool   `json:"truncated"`
-	ShellRestarted bool   `json:"shell_restarted"`
-	ShellDegraded  bool   `json:"shell_degraded"`
+	Output         string
+	Status         string
+	ExitCode       *int
+	CWD            string
+	Truncated      bool
+	Shell          string
+	ShellRestarted bool
+	ShellDegraded  bool
+}
+
+func shellCall(t *testing.T, mc *mcptest.Client, ctx context.Context, args map[string]any) (shellResp, error) {
+	t.Helper()
+	text, err := mc.CallText(ctx, "ssh_shell", args)
+	if err != nil {
+		return shellResp{}, err
+	}
+	return parseShell(text), nil
+}
+
+func mustText(t *testing.T, mc *mcptest.Client, ctx context.Context, tool string, args map[string]any) string {
+	t.Helper()
+	text, err := mc.CallText(ctx, tool, args)
+	if err != nil {
+		t.Fatalf("%s: %v", tool, err)
+	}
+	return text
+}
+
+// parseShell splits a tool result into output and the trailing status line.
+func parseShell(text string) shellResp {
+	body := text
+	line := ""
+	if i := strings.LastIndex(text, "\n["); i >= 0 && strings.HasSuffix(strings.TrimRight(text, "\n"), "]") {
+		body = text[:i]
+		line = strings.TrimRight(text[i+1:], "\n")
+	} else if strings.HasPrefix(text, "[") && strings.HasSuffix(strings.TrimRight(text, "\n"), "]") && !strings.Contains(strings.TrimRight(text, "\n"), "\n") {
+		body = ""
+		line = strings.TrimRight(text, "\n")
+	}
+	r := shellResp{Output: body}
+	if line == "" {
+		return r
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+	for _, seg := range strings.Split(inner, " · ") {
+		switch {
+		case seg == "running — poll to continue":
+			r.Status = "running"
+		case strings.HasPrefix(seg, "exit "):
+			r.Status = "done"
+			n, _ := strconv.Atoi(strings.TrimPrefix(seg, "exit "))
+			r.ExitCode = &n
+		case strings.HasPrefix(seg, "cwd "):
+			r.CWD = strings.TrimPrefix(seg, "cwd ")
+		case seg == "truncated, poll for full output":
+			r.Truncated = true
+		case seg == "shell restarted: cwd/env lost":
+			r.ShellRestarted = true
+		case seg == "degraded: sh fallback":
+			r.ShellDegraded = true
+		case strings.HasPrefix(seg, "shell "):
+			r.Shell = strings.TrimPrefix(seg, "shell ")
+		}
+	}
+	if r.Status == "" {
+		r.Status = "done"
+	}
+	return r
 }
 
 // setupDaemon boots a daemon over a real sshd container with the "testhost"
@@ -129,8 +192,8 @@ func run(t *testing.T, mc *mcptest.Client, host, cmd string) shellResp {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var r shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{"host": host, "command": cmd}, &r); err != nil {
+	r, err := shellCall(t, mc, ctx, map[string]any{"host": host, "command": cmd})
+	if err != nil {
 		t.Fatalf("ssh_shell %q: %v", cmd, err)
 	}
 	return r
@@ -156,6 +219,9 @@ func TestShellCommand(t *testing.T) {
 	if r.CWD == "" {
 		t.Fatal("cwd missing")
 	}
+	if r.Shell != "" {
+		t.Fatalf("default shell named in the status line: %+v", r)
+	}
 	if strings.ContainsAny(r.Output, "") || strings.Contains(r.Output, "__RSM_") {
 		t.Fatalf("unclean output: %q", r.Output)
 	}
@@ -180,19 +246,21 @@ func TestShellNamedParallel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	done := make(chan struct{})
+	done := make(chan shellResp, 1)
 	go func() {
-		defer close(done)
-		var r shellResp
-		_ = mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		r, _ := shellCall(t, mc, ctx, map[string]any{
 			"host": "testhost", "shell": "build", "command": "sleep 3; echo build-done", "timeout_ms": 15000,
-		}, &r)
+		})
+		done <- r
 	}()
 	time.Sleep(500 * time.Millisecond)
 	r := run(t, mc, "testhost", "echo default-shell-works")
-	<-done
+	build := <-done
 	if !strings.Contains(r.Output, "default-shell-works") {
 		t.Fatalf("default shell blocked: %q", r.Output)
+	}
+	if build.Shell != "build" || build.Status != "done" || !strings.Contains(build.Output, "build-done") {
+		t.Fatalf("named shell status = %+v", build)
 	}
 }
 
@@ -203,21 +271,21 @@ func TestShellTimeoutThenPoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var r shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+	r, err := shellCall(t, mc, ctx, map[string]any{
 		"host": "testhost", "command": "sleep 2; echo late-done", "timeout_ms": 300,
-	}, &r); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("command: %v", err)
 	}
 	if r.Status != "running" {
-		t.Fatalf("status=%q want running", r.Status)
+		t.Fatalf("status=%q want running — poll to continue", r.Status)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var p shellResp
-		if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		p, err := shellCall(t, mc, ctx, map[string]any{
 			"host": "testhost", "poll": true, "timeout_ms": 5000,
-		}, &p); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("poll: %v", err)
 		}
 		if p.Status == "done" {
@@ -240,10 +308,9 @@ func TestShellBusyError(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		var r shellResp
-		_ = mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		_, _ = shellCall(t, mc, ctx, map[string]any{
 			"host": "testhost", "command": "sleep 5; echo x", "timeout_ms": 10000,
-		}, &r)
+		})
 	}()
 	time.Sleep(500 * time.Millisecond)
 	_, err := mc.CallText(ctx, "ssh_shell", map[string]any{"host": "testhost", "command": "echo nope"})
@@ -261,33 +328,25 @@ func TestShellInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		var r shellResp
-		_ = mc.CallJSON(ctx, "ssh_shell", map[string]any{
-			"host": "testhost", "command": "sleep 60; echo never", "timeout_ms": 20000,
-		}, &r)
-	}()
-	time.Sleep(500 * time.Millisecond)
-	if _, err := mc.Call(ctx, "ssh_shell", map[string]any{"host": "testhost", "interrupt": true}); err != nil {
+	// The command returns running; interrupt itself reports whether Ctrl-C
+	// ended it, including the exit code.
+	if _, err := shellCall(t, mc, ctx, map[string]any{
+		"host": "testhost", "command": "sleep 60; echo never", "timeout_ms": 400,
+	}); err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	p, err := shellCall(t, mc, ctx, map[string]any{"host": "testhost", "interrupt": true, "timeout_ms": 8000})
+	if err != nil {
 		t.Fatalf("interrupt: %v", err)
 	}
-	var p shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
-		"host": "testhost", "poll": true, "timeout_ms": 8000,
-	}, &p); err != nil {
-		t.Fatalf("poll: %v", err)
-	}
-	<-done
 	if p.Status != "done" {
 		t.Fatalf("status=%q — interrupt did not kill the command", p.Status)
 	}
 	if strings.Contains(p.Output, "never") {
 		t.Fatalf("interrupted command ran to completion: %q", p.Output)
 	}
-	if p.ExitCode != nil && *p.ExitCode == 0 {
-		t.Fatalf("expected non-zero exit after interrupt, got %d", *p.ExitCode)
+	if p.ExitCode == nil || *p.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit after interrupt, got %v", p.ExitCode)
 	}
 }
 
@@ -298,30 +357,21 @@ func TestShellInputInteractive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// The command's own call is still waiting for its marker, so it may be the
-	// one that collects the result. Both callers are legitimate; the assertion
-	// is that the fed line reached the command, not which call returned it.
-	var cmdRes shellResp
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = mc.CallJSON(ctx, "ssh_shell", map[string]any{
-			"host": "testhost", "command": "read -p ANSWER: ans; echo got-$ans", "timeout_ms": 15000,
-		}, &cmdRes)
-	}()
-	time.Sleep(800 * time.Millisecond)
-	if _, err := mc.Call(ctx, "ssh_shell", map[string]any{"host": "testhost", "input": "hello-input" + string(byte(10))}); err != nil {
+	// The prompt is still waiting when the command call times out. input
+	// answers it and returns the program's reply in the same call.
+	if _, err := shellCall(t, mc, ctx, map[string]any{
+		"host": "testhost", "command": "read -p ANSWER: ans; echo got-$ans", "timeout_ms": 800,
+	}); err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	p, err := shellCall(t, mc, ctx, map[string]any{
+		"host": "testhost", "input": "hello-input\n", "timeout_ms": 8000,
+	})
+	if err != nil {
 		t.Fatalf("input: %v", err)
 	}
-	var p shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
-		"host": "testhost", "poll": true, "timeout_ms": 8000,
-	}, &p); err != nil {
-		t.Fatalf("poll: %v", err)
-	}
-	<-done
-	if out := cmdRes.Output + p.Output; !strings.Contains(out, "got-hello-input") {
-		t.Fatalf("interactive input did not reach the command: %q", out)
+	if p.Status != "done" || !strings.Contains(p.Output, "got-hello-input") {
+		t.Fatalf("input did not return the reply: %+v", p)
 	}
 }
 
@@ -331,8 +381,12 @@ func TestShellReset(t *testing.T) {
 	defer teardown()
 
 	run(t, mc, "testhost", "cd /tmp; MARKER=set")
-	if _, err := mc.Call(context.Background(), "ssh_shell", map[string]any{"host": "testhost", "reset": true}); err != nil {
+	text, err := mc.CallText(context.Background(), "ssh_shell", map[string]any{"host": "testhost", "reset": true})
+	if err != nil {
 		t.Fatalf("reset: %v", err)
+	}
+	if text != "[shell restarted: cwd/env lost]" {
+		t.Fatalf("reset status = %q", text)
 	}
 	r := run(t, mc, "testhost", "echo $MARKER $PWD")
 	if !strings.Contains(r.Output, " $") && !strings.Contains(r.Output, " /root") {
@@ -394,10 +448,9 @@ func TestShellReconnectRespawns(t *testing.T) {
 	deadline := time.Now().Add(45 * time.Second)
 	var r shellResp
 	for time.Now().Before(deadline) {
-		var res shellResp
-		err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+		res, err := shellCall(t, mc, ctx, map[string]any{
 			"host": "testhost", "command": "echo after-kill", "timeout_ms": 15000,
-		}, &res)
+		})
 		if err == nil && res.Status == "done" && strings.Contains(res.Output, "after-kill") {
 			r = res
 			break
@@ -430,13 +483,13 @@ func TestShellDegradedOnBrokenRC(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write broken rc: %v", err)
 	}
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{"host": "testhost", "reset": true}, &shellResp{}); err != nil {
+	if _, err := shellCall(t, mc, ctx, map[string]any{"host": "testhost", "reset": true}); err != nil {
 		t.Fatalf("reset after broken rc: %v", err)
 	}
-	var r2 shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+	r2, err := shellCall(t, mc, ctx, map[string]any{
 		"host": "testhost", "command": "echo still-works",
-	}, &r2); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("command on degraded shell: %v", err)
 	}
 	if !r2.ShellDegraded {
@@ -466,10 +519,10 @@ func TestShellCleanUnderNoisyRC(t *testing.T) {
 	if _, err := mc.Call(ctx, "ssh_shell", map[string]any{"host": "testhost", "reset": true}); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
-	var r shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+	r, err := shellCall(t, mc, ctx, map[string]any{
 		"host": "testhost", "command": "echo clean-output",
-	}, &r); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("command: %v", err)
 	}
 	if !strings.Contains(r.Output, "clean-output") {
@@ -488,21 +541,6 @@ func TestShellCleanUnderNoisyRC(t *testing.T) {
 
 // --- file tools on the transparent session -------------------------------------
 
-// fileRead is the ssh_file_read JSON result.
-type fileRead struct {
-	Data       string `json:"data"`
-	StartLine  int    `json:"start_line"`
-	Lines      int    `json:"lines"`
-	TotalLines int    `json:"total_lines"`
-	Truncated  bool   `json:"truncated"`
-}
-
-// fileEdit is the ssh_file_edit JSON result.
-type fileEdit struct {
-	StartLine  int `json:"start_line"`
-	TotalLines int `json:"total_lines"`
-}
-
 func TestFileToolsUseHost(t *testing.T) {
 	t.Parallel()
 	mc, _, _, teardown := setupDaemon(t)
@@ -511,64 +549,43 @@ func TestFileToolsUseHost(t *testing.T) {
 	defer cancel()
 
 	content := "line one\nline two\n"
-	if _, err := mc.Call(ctx, "ssh_file_write", map[string]any{
+	wrote := mustText(t, mc, ctx, "ssh_file_write", map[string]any{
 		"host": "testhost", "path": "/tmp/e2e.txt", "data": content,
-	}); err != nil {
-		t.Fatalf("file_write: %v", err)
+	})
+	if wrote != fmt.Sprintf("wrote %d bytes to /tmp/e2e.txt", len(content)) {
+		t.Fatalf("file_write = %q", wrote)
 	}
 
-	// A small text write then a read returns the new line-window result.
-	var rd fileRead
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	rd := mustText(t, mc, ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": "/tmp/e2e.txt",
-	}, &rd); err != nil {
-		t.Fatalf("file_read: %v", err)
-	}
-	if rd.Data != content {
-		t.Fatalf("round-trip mismatch: %q", rd.Data)
-	}
-	if rd.StartLine != 1 || rd.Lines != 2 || rd.TotalLines != 2 {
-		t.Fatalf("line window = %+v, want start_line 1, lines 2, total_lines 2", rd)
-	}
-	if rd.Truncated {
-		t.Fatalf("whole-file read marked truncated: %+v", rd)
+	})
+	if rd != content+"[lines 1–2 of 2]" {
+		t.Fatalf("file_read = %q", rd)
 	}
 
-	// The edit lands where the read said it would, and the guard holds the
-	// whole file rather than the text that came back.
-	var ed fileEdit
-	if err := mc.CallJSON(ctx, "ssh_file_edit", map[string]any{
+	ed := mustText(t, mc, ctx, "ssh_file_edit", map[string]any{
 		"host": "testhost", "path": "/tmp/e2e.txt", "old_text": "line one", "new_text": "line 1",
-	}, &ed); err != nil {
-		t.Fatalf("file_edit: %v", err)
+	})
+	if ed != "edited line 1 (file now 2 lines)" {
+		t.Fatalf("file_edit = %q", ed)
 	}
-	if ed.StartLine != 1 || ed.TotalLines != 2 {
-		t.Fatalf("edit result = %+v, want start_line 1, total_lines 2", ed)
-	}
-	var after fileRead
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	after := mustText(t, mc, ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": "/tmp/e2e.txt",
-	}, &after); err != nil {
-		t.Fatalf("file_read after edit: %v", err)
-	}
-	if after.Data != "line 1\nline two\n" {
-		t.Fatalf("edited file = %q", after.Data)
+	})
+	if after != "line 1\nline two\n[lines 1–2 of 2]" {
+		t.Fatalf("edited file = %q", after)
 	}
 
-	var entries []struct {
-		Name string `json:"name"`
+	listed := mustText(t, mc, ctx, "ssh_file_list", map[string]any{"host": "testhost", "path": "/tmp"})
+	if !strings.Contains(listed, " e2e.txt\n") && !strings.HasSuffix(listed, " e2e.txt") {
+		t.Fatalf("file_list missing e2e.txt: %q", listed)
 	}
-	if err := mc.CallJSON(ctx, "ssh_file_list", map[string]any{"host": "testhost", "path": "/tmp"}, &entries); err != nil {
-		t.Fatalf("file_list: %v", err)
+	if strings.Contains(listed, "e2e.txt/") {
+		t.Fatalf("file listed as a directory: %q", listed)
 	}
-	found := false
-	for _, e := range entries {
-		if e.Name == "e2e.txt" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("file_list missing e2e.txt")
+	st := mustText(t, mc, ctx, "ssh_file_stat", map[string]any{"host": "testhost", "path": "/tmp/e2e.txt"})
+	if !strings.Contains(st, "name: e2e.txt\n") || !strings.Contains(st, "is_dir: false") {
+		t.Fatalf("file_stat = %q", st)
 	}
 }
 
@@ -588,10 +605,9 @@ func TestFileEditRejectsStaleRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("file_write: %v", err)
 	}
-	var rd fileRead
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	if _, err := mc.CallText(ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": path,
-	}, &rd); err != nil {
+	}); err != nil {
 		t.Fatalf("file_read: %v", err)
 	}
 
@@ -605,28 +621,22 @@ func TestFileEditRejectsStaleRead(t *testing.T) {
 	}
 
 	// Reading again makes the same edit legal, and it lands.
-	var again fileRead
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	again := mustText(t, mc, ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": path,
-	}, &again); err != nil {
-		t.Fatalf("re-read: %v", err)
-	}
-	if again.Data != "changed\n" {
-		t.Fatalf("out-of-band change not visible: %q", again.Data)
+	})
+	if !strings.HasPrefix(again, "changed\n") {
+		t.Fatalf("out-of-band change not visible: %q", again)
 	}
 	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{
 		"host": "testhost", "path": path, "old_text": "changed", "new_text": "CHANGED",
 	}); err != nil {
 		t.Fatalf("edit after a fresh read: %v", err)
 	}
-	var after fileRead
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	after := mustText(t, mc, ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": path,
-	}, &after); err != nil {
-		t.Fatalf("file_read after edit: %v", err)
-	}
-	if after.Data != "CHANGED\n" {
-		t.Fatalf("edited file = %q", after.Data)
+	})
+	if !strings.HasPrefix(after, "CHANGED\n") {
+		t.Fatalf("edited file = %q", after)
 	}
 }
 
@@ -642,10 +652,10 @@ func TestShellWithoutBash(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	var r shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+	r, err := shellCall(t, mc, ctx, map[string]any{
 		"host": "testhost", "command": "command -v bash || echo no-bash-at-all; pwd", "timeout_ms": 20000,
-	}, &r); err != nil {
+	})
+	if err != nil {
 		t.Logf("daemon stderr:\n%s", d.stderr.String())
 		t.Fatalf("ssh_shell on a bash-less host: %v", err)
 	}
@@ -666,19 +676,19 @@ func TestShellWithoutBash(t *testing.T) {
 	}
 
 	// Exit statuses come through the same path, and cd/env still persist.
-	var st shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+	st, err := shellCall(t, mc, ctx, map[string]any{
 		"host": "testhost", "command": "cd /tmp; MARK=fallback", "timeout_ms": 20000,
-	}, &st); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("cd on the fallback shell: %v", err)
 	}
 	if st.Status != "done" || st.CWD != "/tmp" {
 		t.Fatalf("cd did not land: %+v", st)
 	}
-	var again shellResp
-	if err := mc.CallJSON(ctx, "ssh_shell", map[string]any{
+	again, err := shellCall(t, mc, ctx, map[string]any{
 		"host": "testhost", "command": "echo $MARK; exit 3", "timeout_ms": 20000,
-	}, &again); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("second command on the fallback shell: %v", err)
 	}
 	if again.Status != "done" {
@@ -718,46 +728,28 @@ func TestTildePathsResolveToHome(t *testing.T) {
 		t.Fatalf("file_write via ~: %v", err)
 	}
 
-	var st struct {
-		Name string `json:"name"`
-		Size int64  `json:"size"`
-	}
-	if err := mc.CallJSON(ctx, "ssh_file_stat", map[string]any{
+	st := mustText(t, mc, ctx, "ssh_file_stat", map[string]any{
 		"host": "testhost", "path": "~/" + name,
-	}, &st); err != nil {
-		t.Fatalf("file_stat via ~: %v", err)
-	}
-	if st.Name != name || st.Size != int64(len(body)) {
-		t.Fatalf("stat via ~ = %+v, want name %q size %d", st, name, len(body))
+	})
+	if !strings.Contains(st, "name: "+name+"\n") || !strings.Contains(st, fmt.Sprintf("size: %d\n", len(body))) {
+		t.Fatalf("stat via ~ = %q", st)
 	}
 
 	// "~", the absolute path and the SFTP session's own cwd (the same home)
 	// all list the file.
 	for _, p := range []string{"~", "~/", home, ".", "./"} {
-		var entries []struct {
-			Name string `json:"name"`
-		}
-		if err := mc.CallJSON(ctx, "ssh_file_list", map[string]any{
+		listed := mustText(t, mc, ctx, "ssh_file_list", map[string]any{
 			"host": "testhost", "path": p,
-		}, &entries); err != nil {
-			t.Fatalf("file_list %q: %v", p, err)
-		}
-		found := false
-		for _, e := range entries {
-			if e.Name == name {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("file_list %q did not show %s", p, name)
+		})
+		if !strings.Contains(listed, " "+name+"\n") && !strings.HasSuffix(listed, " "+name) {
+			t.Fatalf("file_list %q did not show %s: %q", p, name, listed)
 		}
 	}
 
 	// Read through "~", edit through the absolute path.
-	var rd fileRead
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	if _, err := mc.CallText(ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": "~/" + name,
-	}, &rd); err != nil {
+	}); err != nil {
 		t.Fatalf("file_read via ~: %v", err)
 	}
 	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{
@@ -767,9 +759,9 @@ func TestTildePathsResolveToHome(t *testing.T) {
 	}
 
 	// And the other way round: read absolute, edit via "~".
-	if err := mc.CallJSON(ctx, "ssh_file_read", map[string]any{
+	if _, err := mc.CallText(ctx, "ssh_file_read", map[string]any{
 		"host": "testhost", "path": home + "/" + name,
-	}, &rd); err != nil {
+	}); err != nil {
 		t.Fatalf("file_read absolute: %v", err)
 	}
 	if _, err := mc.CallText(ctx, "ssh_file_edit", map[string]any{

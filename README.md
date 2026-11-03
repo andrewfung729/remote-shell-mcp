@@ -34,13 +34,13 @@ It runs as a single long-lived daemon. Your MCP client connects to the daemon's 
 | Area | What |
 |-|-|
 | **SSH** | transparent sessions — the session id is the host alias, the first call dials automatically (parallel first calls on a cold host wait for that one dial rather than failing on a half-built session). The alias must be a concrete `Host` entry in the daemon user's `~/.ssh/config` — user, hostname, port, ProxyJump chain, and auth (IdentityFile/IdentityAgent) all resolve from that entry; callers never supply credentials, and a missing or wildcard-only entry fails. keepalive + auto-reconnect always on; strict known_hosts |
-| **Shells** | one `ssh_shell` tool on a per-host PTY: `cd` + env + `vim` survive between calls and client restarts; `command`/`poll`/`input`/`interrupt`/`reset`, named parallel shells, 10k head+tail truncation. Long-lived, not persistent — a daemon restart kills them (the remote bash dies with the connection). Hosts without bash are supported through a degraded fallback (`bash --norc`/`sh`, flagged `shell_degraded`), and a command that ends the shell (`exit 7`, `exec …`) still returns its exit code. For state that outlives the daemon, run `tmux`/`screen` inside the shell. Shells are scoped to the MCP client that opened them: a second client on a shared session sees `shell not found`, while the WebUI sees all shells.
+| **Shells** | one `ssh_shell` tool on a per-host PTY: `cd` + env + `vim` survive between calls and client restarts; `command`/`poll`/`input`/`interrupt`/`reset`, named parallel shells (omit `shell` for `default`; a throwaway name such as `scratch` keeps a one-off off that shell). Output is the command's text plus one status line (exit code and cwd, or still running). `input` and `interrupt` wait briefly and return that same shape. Idle shells, including `default`, are closed after 30 minutes unless a command is in flight; the next call reopens the shell and the status line says cwd/env were lost. 10k head+tail truncation. Long-lived, not persistent — a daemon restart kills them (the remote bash dies with the connection). Hosts without bash are supported through a degraded fallback (`bash --norc`/`sh`, noted on the status line), and a command that ends the shell (`exit 7`, `exec …`) still returns its exit code. For state that outlives the daemon, run `tmux`/`screen` inside the shell. Shells are scoped to the MCP client that opened them: a second client on a shared session sees `shell not found`, while the WebUI sees all shells.
 | **SFTP** | list / stat, a bounded text channel (read / write / exactly-once edit, 256 KiB inline budget) and bulk upload / download. Every path may be absolute, relative to the remote home, or written with `~` — the daemon expands it (SFTP itself expands nothing), and the resolved path is what read-before-edit checks compare. Read returns a line window; write truncates or appends and edit is a byte-exact single match. A file larger than the budget or not valid UTF-8 is an error that points at `ssh_download`. `chmod`, `mkdir`, `rm` and `mv` are shell commands, not tools |
-| **Host exposure** | the WebUI decides which `~/.ssh/config` aliases agents may use. Every tool refuses an unexposed host with `host not exposed` (without revealing whether the alias exists); `ssh_hosts` + `ssh_shell` are hidden until one host is on; turning a host off disconnects it immediately |
+| **Host exposure** | the WebUI decides which `~/.ssh/config` aliases agents may use. Every tool refuses an unexposed host with `host not exposed` and names the exposed aliases in the refusal — so a typo gets corrected, while the refusal still never reveals whether the asked-for alias exists in ssh config; `ssh_hosts` + `ssh_shell` are hidden until one host is on; turning a host off disconnects it immediately |
 | **State** | `$XDG_CONFIG_HOME/remote-shell-mcp/state.json` holds only the exposure list + disabled tools — never sessions, hosts' details, or credentials |
 | **Bind** | fixed loopback port `127.0.0.1:47180`; startup refuses non-loopback addresses and exits non-zero if the port is taken. `/mcp` needs no token; the WebUI's `/api` requires a one-time-token cookie |
 | **Transports** | `/mcp` Streamable HTTP (spec remote-MCP transport) — the single MCP transport. |
-| **Output** | tool results are JSON. |
+| **Output** | every tool returns plain text only — no `structuredContent`, no output schema. Shell output and file contents are verbatim, followed by one short status line; small results are a sentence or one record per line. A connection failure is one fixed sentence (host, category, and a hand-off to the user) — the raw error stays on the WebUI hosts page |
 
 ## Run the daemon
 
@@ -140,7 +140,9 @@ regenerates it). It shows:
 - **SSH hosts** — concrete `Host` aliases from the daemon user's
   `~/.ssh/config` (alias, user, hostname, port, ProxyJump). Wildcard
   patterns and `Match` blocks are omitted, and key paths are not shown.
-  The page always lists them. Each host has its own switch: on exposes
+  The page always lists them, including the raw cause and time of the
+  last failed connection for that alias (cleared on the next successful
+  dial). Each host has its own switch: on exposes
   that alias to agents through `ssh_hosts`, which returns only the
   exposed alias names — never user, hostname, port, or other config
   details. The tool stays hidden until at least one host is exposed.

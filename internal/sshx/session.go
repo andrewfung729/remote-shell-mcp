@@ -53,6 +53,7 @@ type Session struct {
 	reconnectMu sync.Mutex // serializes attemptReconnect and Reconnect
 
 	keepaliveCancel context.CancelFunc
+	reapCancel      context.CancelFunc
 	closed          atomic.Bool
 }
 
@@ -172,10 +173,15 @@ func (s *Session) close() {
 	// concurrent startKeepalive setting it.
 	s.mu.Lock()
 	cancel := s.keepaliveCancel
+	reap := s.reapCancel
 	s.keepaliveCancel = nil
+	s.reapCancel = nil
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if reap != nil {
+		reap()
 	}
 	// Drain the shells map but keep it non-nil so any racing OpenShell
 	// fails the closed check below cleanly rather than panicking on a nil map.

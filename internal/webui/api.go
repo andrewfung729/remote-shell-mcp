@@ -185,7 +185,9 @@ func (d *Deps) handleReconnect(w http.ResponseWriter, r *http.Request) {
 
 type hostView struct {
 	sshx.ConfiguredHost
-	Exposed bool `json:"exposed"`
+	Exposed            bool      `json:"exposed"`
+	LastConnectError   string    `json:"last_connect_error,omitempty"`
+	LastConnectErrorAt time.Time `json:"last_connect_error_at,omitempty"`
 }
 
 type hostsResp struct {
@@ -209,7 +211,14 @@ func (d *Deps) handleHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Hosts = make([]hostView, 0, len(hosts))
 	for _, h := range hosts {
-		resp.Hosts = append(resp.Hosts, hostView{ConfiguredHost: h, Exposed: on[h.Alias]})
+		view := hostView{ConfiguredHost: h, Exposed: on[h.Alias]}
+		if d.SSH != nil {
+			if fail, ok := d.SSH.LastConnectFailure(h.Alias); ok {
+				view.LastConnectError = fail.Error
+				view.LastConnectErrorAt = fail.At
+			}
+		}
+		resp.Hosts = append(resp.Hosts, view)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -48,6 +48,32 @@ func TestToolListSurface(t *testing.T) {
 	if !tools["ssh_hosts"] || !tools["ssh_shell"] {
 		t.Fatalf("gated tools not restored after re-expose: %v", tools)
 	}
+
+	mc := mcptest.New(t, a.addr)
+	defer mc.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	schemas, err := mc.OutputSchemaTypes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, typ := range schemas {
+		if typ != "" {
+			t.Fatalf("tool %s declares an output schema %q", name, typ)
+		}
+	}
+	got, err := mc.CallText(ctx, "ssh_hosts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "testhost" {
+		t.Fatalf("ssh_hosts = %q, want one alias", got)
+	}
+	// A tool error is the sentence itself, not a JSON object.
+	_, err = mc.CallText(ctx, "ssh_shell", map[string]any{"host": "testhost"})
+	if err == nil || strings.Contains(err.Error(), "{") || !strings.Contains(err.Error(), "exactly one action") {
+		t.Fatalf("tool error = %v, want plain text", err)
+	}
 }
 
 // TestUnexposedHostRejected covers the exposure boundary as an agent sees it:

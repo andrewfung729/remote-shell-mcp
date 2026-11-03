@@ -31,6 +31,17 @@ func TestStripANSI(t *testing.T) {
 	if got := stripANSI("ab\r\nc\bd"); got != "ab\nd" {
 		t.Fatalf("cr/bs: %q", got)
 	}
+	// Two-byte escapes in the 0x30–0x3F range (keypad/cursor save/reset)
+	if got := stripANSI("\x1b=out\x1b>done"); got != "outdone" {
+		t.Fatalf("fe0x30: %q", got)
+	}
+	if got := stripANSI("\x1b7saved\x1b8\x1bD\x1bE\x1bM\x1bcend"); got != "savedend" {
+		t.Fatalf("fe0x3x: %q", got)
+	}
+	// Charset selects: ESC ( B, ESC ) 0, ESC % G
+	if got := stripANSI("a\x1b(Bb\x1b)0c\x1b%Gd"); got != "abcd" {
+		t.Fatalf("charset: %q", got)
+	}
 }
 
 func TestHeadTailTruncation(t *testing.T) {

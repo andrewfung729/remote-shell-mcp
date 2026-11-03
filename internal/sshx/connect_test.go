@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,4 +120,29 @@ func TestConnectWaiterHonoursContext(t *testing.T) {
 
 	close(block)
 	<-done
+}
+
+func TestConnectRecordsFailureAndDialsAgain(t *testing.T) {
+	var dials atomic.Int32
+	m := coldManager(t, func(ConnectSpec) (*ssh.Client, []*ssh.Client, string, error) {
+		dials.Add(1)
+		return nil, nil, "", errors.New("boom raw")
+	})
+	for i := 0; i < 2; i++ {
+		_, err := m.Connect(context.Background(), "cold")
+		if err == nil || !strings.Contains(err.Error(), "boom raw") {
+			t.Fatalf("connect %d = %v", i, err)
+		}
+	}
+	if dials.Load() != 2 {
+		t.Fatalf("dialed %d times, want 2 — a failure must not be cached", dials.Load())
+	}
+	got, ok := m.LastConnectFailure("cold")
+	if !ok || !strings.Contains(got.Error, "boom raw") || got.At.IsZero() {
+		t.Fatalf("recorded failure = %+v ok=%v", got, ok)
+	}
+	m.clearFailure("cold")
+	if _, ok := m.LastConnectFailure("cold"); ok {
+		t.Fatal("clearFailure left the error in place")
+	}
 }

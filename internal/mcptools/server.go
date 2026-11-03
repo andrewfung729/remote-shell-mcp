@@ -2,7 +2,6 @@ package mcptools
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -168,18 +167,11 @@ func Build(st *State, reg *ClientRegistry, name, version string) *server.MCPServ
 // Keep it short — it lands in every agent's context.
 const serverInstructions = `Remote access over SSH through this server's tools. Do NOT shell out to the local ssh/scp/sftp/rsync CLI — use the ssh_* tools here instead. Hosts must be exposed in the WebUI first; ssh_hosts lists the exposed aliases. ssh_shell runs commands on a host's persistent shell (cd/env survive between calls) and also drives a running command (poll/input/interrupt) or resets it. ssh_file_* / ssh_upload / ssh_download move files on the same hosts.`
 
-// resultJSON serializes a result for an MCP text-content reply. All tool
-// results are JSON — the alternative output format was removed (issue #1).
-func (s *State) resultJSON(v any) (*mcp.CallToolResult, error) {
-	return jsonResult(v)
-}
-
-func jsonResult(v any) (*mcp.CallToolResult, error) {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return mcp.NewToolResultErrorFromErr("encode result", err), nil
-	}
-	return mcp.NewToolResultText(string(data)), nil
+// resultText is the only success shape: one text block, no structuredContent
+// and no output schema. Large outputs stay verbatim instead of being escaped
+// into JSON, and a client that forwards both channels cannot double them.
+func resultText(s string) (*mcp.CallToolResult, error) {
+	return mcp.NewToolResultText(s), nil
 }
 
 func resultErr(err error) (*mcp.CallToolResult, error) {
